@@ -18,7 +18,7 @@ while _EXPERIMENT_REPRODUCTION_DIR.name != "experiment_reproduction":
         raise RuntimeError("failed to locate experiment_reproduction directory")
     _EXPERIMENT_REPRODUCTION_DIR = _EXPERIMENT_REPRODUCTION_DIR.parent
 sys.path.insert(0, str(_EXPERIMENT_REPRODUCTION_DIR))
-from runner_path_utils import path_relative_to, relativize_config_lines
+from runner_path_utils import PYTHON2, path_relative_to, relativize_config_lines, require_python2
 
 
 MODE_TO_CC = {
@@ -196,7 +196,7 @@ def run_task(sim_dir: pathlib.Path, task: dict, no_run: bool):
         }
 
     started = time.time()
-    cmd = ["python2", "./waf", "--run", "scratch/third %s" % path_relative_to(task["config_file"], sim_dir)]
+    cmd = [PYTHON2, "./waf", "--run", "scratch/third %s" % path_relative_to(task["config_file"], sim_dir)]
     with task["run_log"].open("w") as f:
         proc = subprocess.run(cmd, cwd=str(sim_dir), stdout=f, stderr=subprocess.STDOUT)
     elapsed = time.time() - started
@@ -328,6 +328,8 @@ def main():
     parser.add_argument("--output-file", type=pathlib.Path, default=pathlib.Path("results/Figure6_results.csv"),
                         help="CSV output file")
     args = parser.parse_args()
+    if not args.no_run:
+        require_python2()
 
     if args.jobs < 0:
         parser.error("--jobs must be non-negative")

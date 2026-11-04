@@ -9,6 +9,7 @@ and reports per-flow-size diagnosis precision/recall/F1 metrics.
 import argparse
 import csv
 import datetime as _dt
+import os
 import pathlib
 import subprocess
 import sys
@@ -305,7 +306,7 @@ def print_summary(by_size):
 
 
 def run_simulation(sim_dir, config_file, log_file):
-    cmd = ["python2", "./waf", "--run", "scratch/third %s" % config_file]
+    cmd = [os.environ.get("OPP_PYTHON2", "python2"), "./waf", "--run", "scratch/third %s" % config_file]
     with log_file.open("w") as log:
         proc = subprocess.run(cmd, cwd=str(sim_dir), stdout=log, stderr=subprocess.STDOUT)
     return proc.returncode

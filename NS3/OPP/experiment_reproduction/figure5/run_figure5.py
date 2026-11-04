@@ -9,6 +9,9 @@ import sys
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 RUNNER_DIR = SCRIPT_DIR / "runner"
 
+sys.path.insert(0, str(SCRIPT_DIR.parent))
+from runner_path_utils import require_python2  # noqa: E402
+
 RUNNERS = (
     "run_fattree_coverage.py",
     "run_leaf_spine_coverage.py",
@@ -18,6 +21,7 @@ RUNNERS = (
 
 
 def main():
+    require_python2()
     for runner in RUNNERS:
         runner_path = RUNNER_DIR / runner
         cmd = [sys.executable, str(runner_path), "--opp-multicast-mode", "USM"]

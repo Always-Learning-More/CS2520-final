@@ -53,3 +53,14 @@ See `solver/unit-merge/README.md` for the shortcut list.
 
 The ns-3 simulator and figure reproduction scripts are under `NS3/OPP/`.
 See `NS3/OPP/README.md` for build commands and experiment runner entry points.
+
+## Windows / WSL
+
+To run this repository on Windows through WSL Ubuntu (including Ubuntu
+24.04/26.04, which no longer ship Python 2 or gcc-5), see `wsl/README.md`:
+
+```bash
+python3 wsl/prepare_wsl.py   # fix line endings/permissions after copying from Windows
+wsl/opp.sh build             # build ns-3 in the bundled toolchain container
+wsl/opp.sh smoke
+```

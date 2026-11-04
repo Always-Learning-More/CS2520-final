@@ -15,6 +15,9 @@ import tempfile
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from types import SimpleNamespace
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from runner_path_utils import require_python2  # noqa: E402
+
 
 GROUP_SPECS = (
     ("a", "run_figure7a_8a_acl_drop.py"),
@@ -229,6 +232,8 @@ def main():
     parser.add_argument("--opp-m3", type=int, default=1)
     parser.add_argument("--no-run", action="store_true")
     args = parser.parse_args()
+    if not args.no_run:
+        require_python2()
 
     if args.jobs <= 0:
         parser.error("--jobs must be positive")

@@ -1,6 +1,7 @@
 # Figure 5
 
-Run from the repository root:
+Run from `NS3/OPP/` (the directory that contains `simulation/` and
+`experiment_reproduction/`):
 
 ```bash
 python3 experiment_reproduction/figure5/run_figure5.py

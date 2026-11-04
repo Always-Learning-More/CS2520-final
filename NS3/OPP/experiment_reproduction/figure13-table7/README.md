@@ -1,6 +1,7 @@
 # Figure 13 and Table 7
 
-Run from the repository root:
+Run from `NS3/OPP/` (the directory that contains `simulation/` and
+`experiment_reproduction/`):
 
 ```bash
 python3 experiment_reproduction/figure13-table7/run_figure13.py
