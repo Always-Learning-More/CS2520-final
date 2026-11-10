@@ -57,7 +57,31 @@ All commands run in the WSL Ubuntu terminal. WSL 2 is required for containers
 
    `smoke` runs a 2-node, 1-flow simulation and prints its flow-completion file.
 
-## Running the experiments
+## Running every figure with one command
+
+```bash
+cd ~/OmniPath-Ping
+wsl/run_all_figures.sh --jobs 8
+```
+
+This builds ns-3 if needed, then runs Figures 10, 12, 13/Table 7, 6, 9, 14, 5
+and 7-8 in that order (cheapest first) and finishes with a summary of each
+step and the list of result CSVs written. Logs for every step are saved in
+`NS3/OPP/experiment_reproduction/logs/<timestamp>/`. A step is marked as a
+problem if its runner exits with an error or any simulation reports
+`status=failed`/`status=exception`.
+
+Useful options: `--only 6 12` (just those figures), `--skip 7-8` (everything
+else; Figures 7-8 are by far the longest), `--no-run` (dry run), and
+`--stop-on-error`. The full run takes many hours, so keep it alive after
+closing the terminal with:
+
+```bash
+nohup wsl/run_all_figures.sh --jobs 8 > run_all.log 2>&1 &
+tail -f run_all.log
+```
+
+## Running individual experiments
 
 Prefix the usual commands with `wsl/opp.sh`. Run them from `NS3/OPP/`:
 
