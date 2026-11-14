@@ -12,7 +12,18 @@ PAPER_SCALE = {
     "leaf-spine": "paper evaluates k=32 and k=64 (2,048 hosts)",
     "2d-torus": "paper evaluates 4x4 .. 10x10 (100 hosts)",
     "3d-torus": "paper evaluates 3x3x3 .. 6x6x6 (216 hosts)",
+    "ot-purdue": "not in the paper: Purdue-model plant network (levels 3 -> 2 -> 1/0); "
+                 "chains of 12 give the minimum 52 hosts / 51 switches",
 }
+
+# Source host used by the demo and the OT tests (closest/furthest are measured
+# from here). The OT network starts at 11.0.11.1, which with chains of 12 is
+# dev-1a-8, low in cell 1a's daisy chain.
+DEFAULT_SOURCE = {"ot-purdue": 11}
+
+
+def default_source(topo):
+    return DEFAULT_SOURCE.get(topo.arch, 0)
 
 GROUPING = {
     "fat-tree": "task group = (source ToR, destination PoD); "
@@ -21,6 +32,8 @@ GROUPING = {
                   "Token_ID = <src ToR, dst ToR, token>; spines keep no OP cache",
     "2d-torus": "task group = source node; Token_ID = <src node, token>",
     "3d-torus": "task group = source node; Token_ID = <src node, token>",
+    "ot-purdue": "task group = source switch; Token_ID = <src switch, token> "
+                 "(no equal-cost paths, so probes are never duplicated)",
 }
 
 
@@ -38,6 +51,11 @@ def op_cache(arch, size, m=None):
         entries = p["m1"] + 2 * p["m2"] * k
         conc = p["m1"] + p["m2"] * (k - 1)
         text = "m1 + 2*m2*k with m1=%(m1)d m2=%(m2)d" % p
+    elif arch == "ot-purdue":
+        d = 3 + 4 * size              # every switch is a source switch for its hosts
+        entries = p["m"] * d
+        conc = p["m"]
+        text = "m*d with m=%d, d=%d switches" % (p["m"], d)
     else:
         d = size ** (2 if arch == "2d-torus" else 3)
         entries = p["m"] * d
@@ -51,30 +69,48 @@ def summarize(topo, routing):
     counts = topo.tier_counts()
     host_links = topo.num_hosts
     fabric_links = len(topo.links) - host_links
-    furthest, dist = routing.furthest_hosts(0)
-    sample_dst = furthest[0]
-    paths = routing.path_count(0, sample_dst)
+    src = default_source(topo)
+    furthest, dist = routing.furthest_hosts(src)
+    closest, cdist = routing.closest_hosts(src)
+    far, near = furthest[0], closest[0]
+    paths = routing.path_count(src, far)
     rtt = 2 * dist * (engine.LINK_DELAY_NS + engine.TX_NS) / 1000.0
     radix = max(len(topo.adj[s]) for s in topo.switches)
     entries, conc, formula = op_cache(arch, size)
-    tiers = ", ".join("%s %d" % (t, counts[t]) for t in ("tor", "agg", "core", "leaf", "spine", "node")
+    tiers = ", ".join("%s %d" % (t, counts[t])
+                      for t in ("tor", "agg", "core", "leaf", "spine", "area", "cell", "node")
                       if t in counts)
-    fanout = []
-    for s in routing.dag_switches(0, sample_dst):
-        n = len(routing.ecmp_ports(s, sample_dst))
-        fanout.append("%s:%d" % (topo.name[s], n))
+    bridges = routing.bridges()
+    fabric_bridges = [(l, c) for l, c in bridges
+                      if not (topo.is_host(l[0]) or topo.is_host(l[1]))]
+    worst = max(bridges, key=lambda b: b[1]) if bridges else None
+
+    def ips(hosts):
+        shown = ", ".join(topo.ip(h) for h in hosts[:4])
+        return shown + (" ... (%d total)" % len(hosts) if len(hosts) > 4 else "")
+
     info = [
         ("architecture", topo.describe()),
         ("hosts", "%d  (IPs %s .. %s)" % (topo.num_hosts, node_id_to_ip(0), node_id_to_ip(topo.num_hosts - 1))),
         ("switches", "%d  (%s), max radix %d" % (topo.num_nodes - topo.num_hosts, tiers, radix)),
         ("links", "%d  (%d host links, %d fabric links), %d Gbps, %d us each"
          % (len(topo.links), host_links, fabric_links, 400, engine.LINK_DELAY_NS // 1000)),
-        ("diameter", "%d switch hops between the furthest hosts" % (dist - 1)),
-        ("furthest from host-0", "%d host(s) at %d switch hops, e.g. %s (%s)"
-         % (len(furthest), dist - 1, topo.name[sample_dst], topo.ip(sample_dst))),
-        ("equal-cost paths", "%d between host-0 and %s" % (paths, topo.name[sample_dst])),
-        ("ECMP fan-out", " ".join(fanout[:12]) + (" ..." if len(fanout) > 12 else "")),
-        ("max base RTT", "%.1f us" % rtt),
+        ("diameter", "%d switch hops between the furthest hosts" % routing.diameter_switch_hops()),
+        ("source for tests", "%s %s" % (topo.ip(src), topo.name[src])),
+        ("furthest", "%d host(s) at %d switch hops: %s" % (len(furthest), dist - 1, ips(furthest))),
+        ("  route", routing.route_text(src, far)),
+        ("  traverse", routing.traverse_text(src, far)),
+        ("closest", "%d host(s) at %d switch hops: %s" % (len(closest), cdist - 1, ips(closest))),
+        ("  route", routing.route_text(src, near)),
+        ("  traverse", routing.traverse_text(src, near)),
+        ("equal-cost paths", "%d to the furthest host, %d to the closest"
+         % (paths, routing.path_count(src, near))),
+        ("single points of failure", "%d of %d fabric links (plus %d host access links)%s"
+         % (len(fabric_bridges), fabric_links, host_links,
+            "; worst single-link outage %s cuts off %d hosts"
+            % ("%s - %s" % (topo.name[worst[0][0]], topo.name[worst[0][1]]), worst[1])
+            if worst and worst[1] > 1 else "; no fabric link outage isolates any host")),
+        ("max base RTT", "%.1f us (furthest pair)" % rtt),
         ("OPP task grouping", GROUPING[arch]),
         ("OP cache / switch", "%d entries = %.1f KB at %d B/entry  [%s]"
          % (entries, entries * ENTRY_BYTES / 1024.0, ENTRY_BYTES, formula)),

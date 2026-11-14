@@ -246,11 +246,89 @@ def torus_3d(n):
     return t
 
 
+def ot_purdue(n):
+    """Purdue-model OT plant network: core -> 2 areas -> 2 cells each, every
+    cell a daisy chain of n switches with one field device per switch.
+
+        Level 3   core            historian, eng-ws
+        Level 2   area-1, area-2  hmi-1, hmi-2
+        Level 1/0 cells 1a 1b 2a 2b: <cell>-s1 - <cell>-s2 - ... - <cell>-sn,
+                  one device dev-<cell>-<i> on each chain switch
+
+    Every switch has exactly one uplink: the graph is a tree, so there is a
+    single path between any two hosts and every link is a single point of
+    failure. Hosts: 4 + 4n, switches: 3 + 4n, links: 6 + 8n.
+    """
+    if n < 1:
+        raise ValueError("ot-purdue chain length must be >= 1")
+    cells = ["1a", "1b", "2a", "2b"]
+    hosts = 4 + 4 * n
+    t = Topology("ot-purdue", {"n": n}, hosts)
+    t.add_node(HOST, "host", "historian", {"level": 3, "role": "historian"})
+    t.add_node(HOST, "host", "eng-ws", {"level": 3, "role": "engineering workstation"})
+    t.add_node(HOST, "host", "hmi-1", {"level": 2, "area": 1, "role": "HMI"})
+    t.add_node(HOST, "host", "hmi-2", {"level": 2, "area": 2, "role": "HMI"})
+    for cell in cells:
+        for i in range(1, n + 1):
+            t.add_node(HOST, "host", "dev-%s-%d" % (cell, i),
+                       {"level": 0, "area": int(cell[0]), "cell": cell, "position": i,
+                        "role": "field device"})
+    core = t.add_node(SWITCH, "core", "core", {"level": 3})
+    areas = [t.add_node(SWITCH, "area", "area-%d" % a, {"level": 2, "area": a}) for a in (1, 2)]
+    chain = {}
+    for cell in cells:
+        chain[cell] = [t.add_node(SWITCH, "cell", "%s-s%d" % (cell, i),
+                                  {"level": 1, "area": int(cell[0]), "cell": cell, "position": i})
+                       for i in range(1, n + 1)]
+    # host access links, in host order
+    t.add_link(0, core)
+    t.add_link(1, core)
+    t.add_link(2, areas[0])
+    t.add_link(3, areas[1])
+    h = 4
+    for cell in cells:
+        for sw in chain[cell]:
+            t.add_link(h, sw)
+            h += 1
+    # backbone: core -> areas -> first switch of each cell -> down each chain
+    for a in areas:
+        t.add_link(core, a)
+    for cell in cells:
+        t.add_link(areas[int(cell[0]) - 1], chain[cell][0])
+    for cell in cells:
+        for up, down in zip(chain[cell], chain[cell][1:]):
+            t.add_link(up, down)
+    return t
+
+
+# Every model must have at least this many hosts AND switches.
+MIN_HOSTS = 50
+MIN_SWITCHES = 50
+
+# arch -> (generator, size parameter name, default size)
+# Defaults are the smallest sizes meeting the 50 + 50 floor.
 ARCHES = {
-    "fat-tree": (fat_tree, "k", 4),
-    "leaf-spine": (leaf_spine, "k", 4),
-    "2d-torus": (torus_2d, "n", 4),
-    "3d-torus": (torus_3d, "n", 3),
+    "fat-tree": (fat_tree, "k", 8),          # 128 hosts,  80 switches
+    "leaf-spine": (leaf_spine, "k", 34),     # 578 hosts,  51 switches
+    "2d-torus": (torus_2d, "n", 8),          #  64 hosts,  64 switches
+    "3d-torus": (torus_3d, "n", 4),          #  64 hosts,  64 switches
+    "ot-purdue": (ot_purdue, "n", 12),       #  52 hosts,  51 switches
+}
+
+# (hosts, switches) as a function of size, and whether a size is valid
+COUNTS = {
+    "fat-tree": lambda k: (k ** 3 // 4, 5 * k * k // 4),
+    "leaf-spine": lambda k: (k * k // 2, 3 * k // 2),
+    "2d-torus": lambda n: (n * n, n * n),
+    "3d-torus": lambda n: (n ** 3, n ** 3),
+    "ot-purdue": lambda n: (4 + 4 * n, 3 + 4 * n),
+}
+VALID_SIZE = {
+    "fat-tree": lambda k: k >= 2 and k % 2 == 0,
+    "leaf-spine": lambda k: k >= 2 and k % 2 == 0,
+    "2d-torus": lambda n: n >= 3,
+    "3d-torus": lambda n: n >= 3,
+    "ot-purdue": lambda n: n >= 1,
 }
 
 ARCH_TITLES = {
@@ -258,6 +336,7 @@ ARCH_TITLES = {
     "leaf-spine": "Leaf-spine",
     "2d-torus": "2D torus",
     "3d-torus": "3D torus",
+    "ot-purdue": "OT Purdue plant",
 }
 
 # Topology files shipped in the repo, keyed by (arch, size).
@@ -277,11 +356,41 @@ REPO_TOPOLOGY_FILES = {
 }
 
 
-def build(arch, size=None):
+def minimum_size(arch):
+    """Smallest valid size with at least MIN_HOSTS hosts and MIN_SWITCHES switches."""
+    size = 1
+    while True:
+        if VALID_SIZE[arch](size):
+            hosts, switches = COUNTS[arch](size)
+            if hosts >= MIN_HOSTS and switches >= MIN_SWITCHES:
+                return size
+        size += 1
+
+
+def generate(arch, size=None):
+    """Build any size, without the 50-host / 50-switch floor (used for unit tests
+    of small shapes and for comparing against the repo's smaller topology files)."""
     if arch not in ARCHES:
         raise ValueError("unknown architecture %r (choose from %s)" % (arch, ", ".join(ARCHES)))
     fn, _, default = ARCHES[arch]
     return fn(default if size is None else size)
+
+
+def build(arch, size=None):
+    """Build a model; refuses sizes below 50 hosts or 50 switches."""
+    if arch not in ARCHES:
+        raise ValueError("unknown architecture %r (choose from %s)" % (arch, ", ".join(ARCHES)))
+    _, param, default = ARCHES[arch]
+    size = default if size is None else size
+    if not VALID_SIZE[arch](size):
+        raise ValueError("%s %s=%d is not a valid size" % (arch, param, size))
+    hosts, switches = COUNTS[arch](size)
+    if hosts < MIN_HOSTS or switches < MIN_SWITCHES:
+        raise ValueError("%s %s=%d has %d hosts and %d switches; every model needs at least "
+                         "%d hosts and %d switches (smallest allowed: %s=%d)"
+                         % (arch, param, size, hosts, switches, MIN_HOSTS, MIN_SWITCHES,
+                            param, minimum_size(arch)))
+    return generate(arch, size)
 
 
 def repo_topology_dir():

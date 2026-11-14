@@ -41,6 +41,39 @@ class TopologySizes(unittest.TestCase):
                 fn(bad)
 
 
+class SizeFloor(unittest.TestCase):
+    """Every model used by the CLI has at least 50 hosts and 50 switches."""
+
+    def test_defaults_meet_the_floor(self):
+        for arch in topology.ARCHES:
+            t = topology.build(arch)
+            self.assertGreaterEqual(t.num_hosts, 50, arch)
+            self.assertGreaterEqual(t.num_nodes - t.num_hosts, 50, arch)
+
+    def test_defaults_are_the_smallest_allowed(self):
+        expect = {"fat-tree": 8, "leaf-spine": 34, "2d-torus": 8, "3d-torus": 4, "ot-purdue": 12}
+        for arch, size in expect.items():
+            self.assertEqual(topology.minimum_size(arch), size)
+            self.assertEqual(topology.ARCHES[arch][2], size)
+
+    def test_count_formulas(self):
+        for arch in topology.ARCHES:
+            for size in range(1, 13):
+                if topology.VALID_SIZE[arch](size):
+                    t = topology.generate(arch, size)
+                    self.assertEqual(topology.COUNTS[arch](size),
+                                     (t.num_hosts, t.num_nodes - t.num_hosts))
+
+    def test_small_models_rejected(self):
+        for arch, size in (("fat-tree", 6), ("leaf-spine", 32), ("2d-torus", 7),
+                           ("3d-torus", 3), ("ot-purdue", 11)):
+            with self.assertRaises(ValueError) as cm:
+                topology.build(arch, size)
+            self.assertIn("at least 50 hosts and 50 switches", str(cm.exception))
+        for arch, size in (("fat-tree", 64), ("leaf-spine", 64), ("2d-torus", 10)):
+            topology.build(arch, size)                     # paper sizes are fine
+
+
 class Addressing(unittest.TestCase):
     def test_simulator_ip_scheme(self):
         self.assertEqual(topology.node_id_to_ip(0), "11.0.0.1")
@@ -82,7 +115,7 @@ class RepoParity(unittest.TestCase):
                 continue
             with self.subTest(arch=arch, size=size):
                 num_nodes, switches, links = topology.read_topology_file(path)
-                t = topology.build(arch, size)
+                t = topology.generate(arch, size)     # some repo files are below the 50/50 floor
                 self.assertEqual(num_nodes, t.num_nodes)
                 self.assertEqual(switches, list(t.switches))
                 self.assertEqual(links, t.links)        # same order -> same port numbers

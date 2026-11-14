@@ -18,9 +18,12 @@ TTL_DEFAULT = 64
 
 
 class Sample(object):
-    __slots__ = ("links", "delivered", "reply_lost", "lost_at", "rtt_ns", "qdelays", "responder")
+    __slots__ = ("links", "delivered", "reply_lost", "lost_at", "rtt_ns", "qdelays", "responder",
+                 "fwd_rx", "rev_rx")
 
     def __init__(self):
+        self.fwd_rx = 0            # switches that received the probe
+        self.rev_rx = 0            # switches that received the reply
         self.links = []            # [(switch, port), ...] egress links taken
         self.delivered = False
         self.reply_lost = False
@@ -46,6 +49,8 @@ def _walk(topo, routing, failure, rng, src, dst, ttl):
             return s
         t += qdelay + engine.TX_NS + engine.LINK_DELAY_NS
         nxt = topo.neighbor(node, port)
+        if not topo.is_host(nxt):
+            s.fwd_rx += 1
         if topo.is_host(nxt):
             if nxt != dst:
                 s.lost_at = (node, port)
@@ -69,6 +74,8 @@ def _walk(topo, routing, failure, rng, src, dst, ttl):
             s.reply_lost = True
             s.lost_at = (a, p)
             return s
+        if not topo.is_host(b):
+            s.rev_rx += 1
         back += engine.TX_NS + engine.LINK_DELAY_NS
     s.rtt_ns = back
     return s
@@ -118,6 +125,8 @@ class BaselineReport(object):
         self.rpingmesh_links = []  # (kind, (switch, port) or switch)
         self.rdprobe_links = []
         self.first_fault_sample = None
+        self.anomalous = []        # 1-based indices of pings that looked wrong
+        self.rdprobe_samples = []  # per ping: (kind, link) the mirrors pinpoint, or None
 
 
 def run(topo, routing, failure, rng, src, dst, count):
@@ -132,6 +141,8 @@ def run(topo, routing, failure, rng, src, dst, count):
     lost = [s for s in rep.pings if not s.delivered or s.reply_lost]
     slow = [s for s in rep.pings if s.rtt_ns and s.rtt_ns - base_rtt > engine.T_QDELAY_NS]
     odd = [s for s in rep.pings if s.delivered and len(s.links) != expected_len]
+    bad = set(map(id, lost + slow + odd))
+    rep.anomalous = [i + 1 for i, s in enumerate(rep.pings) if id(s) in bad]
 
     # ---------------- RD-Probe* (Ping + Mirror): exact per-sample visibility
     for i, s in enumerate(rep.pings):
@@ -146,6 +157,7 @@ def run(topo, routing, failure, rng, src, dst, count):
         elif s.qdelays and max(s.qdelays) > engine.T_QDELAY_NS:
             j = s.qdelays.index(max(s.qdelays))
             culprit = ("congestion", s.links[j])
+        rep.rdprobe_samples.append(culprit)
         if culprit and culprit not in rep.rdprobe_links:
             rep.rdprobe_links.append(culprit)
             if rep.first_fault_sample is None:
@@ -161,7 +173,7 @@ def run(topo, routing, failure, rng, src, dst, count):
     for ttl, samples in rep.trace:
         expected = layers[ttl - 1] if ttl - 1 < len(layers) else []
         replies = collections.Counter(s.responder for s in samples if s.rtt_ns is not None)
-        if lost and len(replies) and sum(replies.values()) < len(samples):
+        if lost and sum(replies.values()) < len(samples):
             counts = {sw: replies.get(sw, 0) for sw in expected}
             fewest = min(counts.values()) if counts else None
             blamed = sorted(sw for sw, c in counts.items() if c == fewest)

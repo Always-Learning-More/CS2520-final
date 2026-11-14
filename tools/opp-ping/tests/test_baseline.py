@@ -29,7 +29,7 @@ class Baselines(unittest.TestCase):
         for kind in ("acl-drop", "congestion", "port-down"):
             with self.subTest(kind=kind):
                 topo, rt, rng, src, dst, fail = setup("fat-tree", kind=kind)
-                rep = baseline.run(topo, rt, fail, rng, src, dst, 64)
+                rep = baseline.run(topo, rt, fail, rng, src, dst, 256)
                 self.assertIn(fail.link, [link for _, link in rep.rdprobe_links])
                 self.assertIsNotNone(rep.trace)
                 self.assertTrue(rep.rpingmesh)
@@ -42,7 +42,7 @@ class Baselines(unittest.TestCase):
 
     def test_loop_seen_as_unexpected_ttl(self):
         topo, rt, rng, src, dst, fail = setup("leaf-spine", kind="loop", loop_prob=1.0)
-        rep = baseline.run(topo, rt, fail, rng, src, dst, 32)
+        rep = baseline.run(topo, rt, fail, rng, src, dst, 256)
         self.assertIn(("misroute", (fail.switch, fail.wrong_port)), rep.rdprobe_links)
 
 

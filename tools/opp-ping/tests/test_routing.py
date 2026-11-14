@@ -58,7 +58,8 @@ class Paths(unittest.TestCase):
         self.assertEqual(self.furthest_paths(topology.fat_tree(64))[2], 1024)
 
     def test_diameters(self):
-        expect = {"fat-tree": 5, "leaf-spine": 3, "2d-torus": 5, "3d-torus": 4}
+        # defaults: fat-tree k=8, leaf-spine k=34, 8x8 torus, 4x4x4 torus, OT chains of 12
+        expect = {"fat-tree": 5, "leaf-spine": 3, "2d-torus": 9, "3d-torus": 7, "ot-purdue": 27}
         for arch, d in expect.items():
             self.assertEqual(routing.Routing(topology.build(arch)).diameter_switch_hops(), d)
 

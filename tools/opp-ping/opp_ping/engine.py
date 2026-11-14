@@ -226,6 +226,17 @@ class OppNetwork(object):
                       % self._n(sw))
             return
         e = self.cache.get(sw)
+        if (e is not None and p.seq == e.seq and e.rem != expected_rem
+                and p.rem == expected_rem):
+            # The entry was opened by a copy that took a detour (it arrived
+            # first, with the wrong Remaining_Hop_Count). The switch checks the
+            # hop count against its own distance to the destination (App. C,
+            # note 3), so the on-path copy takes the entry over; the loop
+            # evidence is kept.
+            self._log("%s on-path copy replaces entry opened by a detoured copy -> Is_Loop=1"
+                      % self._n(sw))
+            self._new_entry(sw, in_port, p, is_loop=True)
+            return
         if e is None or p.seq > e.seq:
             self._new_entry(sw, in_port, p)
         elif p.seq == e.seq and not e.expired:
@@ -254,13 +265,14 @@ class OppNetwork(object):
         else:
             self._log("%s drops outdated probe" % self._n(sw))
 
-    def _new_entry(self, sw, in_port, p):
+    def _new_entry(self, sw, in_port, p, is_loop=False):
         res = self._result
         routing, topo = self.routing, self.topo
         candidate = routing.ecmp_ports(sw, p.dst)
         e = Entry(p.seq, in_port, candidate, p, self.now)
+        e.is_loop = is_loop
         self.cache[sw] = e
-        self._at(e.expire_at, self._expire, sw, p.seq)
+        self._at(e.expire_at, self._expire, sw, e)
         if not p.usm:
             self._log("%s new entry; native multicast to ports %s"
                       % (self._n(sw), candidate))
@@ -330,9 +342,9 @@ class OppNetwork(object):
                       e.faulty_link, e.is_loop)
             self._send(sw, port, ack, self.now, is_probe=False)
 
-    def _expire(self, sw, seq):
+    def _expire(self, sw, entry):
         e = self.cache.get(sw)
-        if e is None or e.seq != seq or e.done:
+        if e is not entry or e.done:
             return
         e.expired = True
         port = self.rng.choice(sorted(e.outputs))
@@ -382,7 +394,7 @@ def diagnose(topo, routing, res):
     return findings
 
 
-def localize_loop(net, res, first_seq, attempts=8):
+def localize_loop(net, res, first_seq, attempts=16):
     """Appendix C: pin the misconfigured switch of a detected loop.
 
     If the ACK already reports an unexpected link out of an on-path switch,

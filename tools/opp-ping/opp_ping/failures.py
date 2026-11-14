@@ -28,9 +28,15 @@ FAILURE_INFO = {
 
 FAILURE_TYPES = tuple(FAILURE_INFO)
 
-# Preferred switch tier for automatic placement, mirroring the paper's
-# setup (failures on uplinks out of the source-side aggregation layer).
-PREFERRED_TIER = {"fat-tree": "agg", "leaf-spine": "leaf"}
+# Automatic placement: (switch tier, side of the path). Clos topologies mirror
+# the paper (uplinks out of the source-side aggregation/leaf layer). The OT
+# network deliberately uses a different node: the destination-side area
+# switch's downlink into the target cell.
+PLACEMENT = {
+    "fat-tree": ("agg", "source"),
+    "leaf-spine": ("leaf", "source"),
+    "ot-purdue": ("area", "destination"),
+}
 
 
 class Failure(object):
@@ -163,22 +169,30 @@ def place(kind, topo, routing, src, dst, rng, fail_at=None, fail_link=None, **pa
 def _auto_location(topo, routing, src, dst, rng, need_wrong_port=False):
     dag = routing.dag_switches(src, dst)
     dst_tor = topo.attached_switch(dst)
-    candidates = [s for s in dag if s != dst_tor]
+    candidates = [s for s in dag if s != dst_tor] or [dst_tor]   # same-switch hosts
     if need_wrong_port:
         # a misrouting failure needs an off-path switch neighbor to send to
         # (fat-tree: Agg -> ToR as in the paper; leaf-spine: spine -> leaf)
         with_wrong = [s for s in candidates if _has_wrong_port(topo, routing, s, dst)]
         candidates = with_wrong or candidates
-    tier = PREFERRED_TIER.get(topo.arch)
-    if tier:
+    rule = PLACEMENT.get(topo.arch)
+    preferred = []
+    if rule:
+        tier, side = rule
         hops = routing.hops(src, dst)
-        # upstream switches of the preferred tier (source side of the path)
-        upstream = [s for s in candidates
-                    if topo.tier[s] == tier and 2 * routing.hops(src, s) < hops]
-        if upstream and (not need_wrong_port or all(
-                _has_wrong_port(topo, routing, s, dst) for s in upstream)):
-            candidates = upstream
-    else:
+        tiered = [s for s in candidates if topo.tier[s] == tier]
+        if side == "source":
+            preferred = [s for s in tiered if 2 * routing.hops(src, s) < hops]
+        elif tiered:
+            # destination side: the tier switch(es) nearest the destination,
+            # e.g. the target's own area switch in the OT network
+            best = min(routing.hops(s, dst) for s in tiered)
+            preferred = [s for s in tiered if routing.hops(s, dst) == best]
+        if need_wrong_port:
+            preferred = [s for s in preferred if _has_wrong_port(topo, routing, s, dst)]
+    if preferred:
+        candidates = preferred
+    elif not rule:
         multi = [s for s in candidates if len(routing.ecmp_ports(s, dst)) > 1]
         if multi:
             candidates = multi
