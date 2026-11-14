@@ -14,6 +14,10 @@ PAPER_SCALE = {
     "3d-torus": "paper evaluates 3x3x3 .. 6x6x6 (216 hosts)",
     "ot-purdue": "not in the paper: Purdue-model plant network (levels 3 -> 2 -> 1/0); "
                  "chains of 12 give the minimum 52 hosts / 51 switches",
+    "dragonfly": "paper Table 6 only (grouping heuristic): 129 groups x 16 switches, "
+                 "8 global links/switch, 16,512 hosts; build it with --size paper",
+    "dragonfly-plus": "paper Table 6 only (grouping heuristic): 33 groups x (32 leaf + 32 spine), "
+                      "67,584 hosts; build it with --size paper",
 }
 
 # Source host used by the demo and the OT tests (closest/furthest are measured
@@ -34,7 +38,14 @@ GROUPING = {
     "3d-torus": "task group = source node; Token_ID = <src node, token>",
     "ot-purdue": "task group = source switch; Token_ID = <src switch, token> "
                  "(no equal-cost paths, so probes are never duplicated)",
+    "dragonfly": "no topology-specialized grouping in the paper; Section 5.3's merge "
+                 "heuristic groups tasks (solver/unit-merge, example 'dragonfly')",
+    "dragonfly-plus": "no topology-specialized grouping in the paper; Section 5.3's merge "
+                      "heuristic groups tasks (solver/unit-merge, example 'dragonfly-plus')",
 }
+
+# Paper Table 6, heuristic column, at the paper's sizes (B = 20).
+TABLE6_ENTRIES = {"dragonfly": 4096, "dragonfly-plus": 4096}
 
 
 def op_cache(arch, size, m=None):
@@ -51,6 +62,11 @@ def op_cache(arch, size, m=None):
         entries = p["m1"] + 2 * p["m2"] * k
         conc = p["m1"] + p["m2"] * (k - 1)
         text = "m1 + 2*m2*k with m1=%(m1)d m2=%(m2)d" % p
+    elif arch in ("dragonfly", "dragonfly-plus"):
+        return None, None, ("no closed-form formula in the paper; Table 6 reports %d entries "
+                            "per switch from the merge heuristic at paper scale. Run "
+                            "'bash scripts/reproduce_six_tor_scope.sh %s' in solver/unit-merge"
+                            % (TABLE6_ENTRIES[arch], arch))
     elif arch == "ot-purdue":
         d = 3 + 4 * size              # every switch is a source switch for its hosts
         entries = p["m"] * d
@@ -62,6 +78,10 @@ def op_cache(arch, size, m=None):
         conc = p["m"]
         text = "m*d with m=%d, d=%d nodes" % (p["m"], d)
     return entries, conc, text
+
+
+def _hops(n):
+    return "1 switch hop" if n == 1 else "%d switch hops" % n
 
 
 def summarize(topo, routing):
@@ -78,8 +98,11 @@ def summarize(topo, routing):
     radix = max(len(topo.adj[s]) for s in topo.switches)
     entries, conc, formula = op_cache(arch, size)
     tiers = ", ".join("%s %d" % (t, counts[t])
-                      for t in ("tor", "agg", "core", "leaf", "spine", "area", "cell", "node")
+                      for t in ("tor", "agg", "core", "leaf", "spine", "area", "cell", "node",
+                                "router")
                       if t in counts)
+    if "groups" in topo.params:
+        tiers += " in %d groups" % topo.params["groups"]
     bridges = routing.bridges()
     fabric_bridges = [(l, c) for l, c in bridges
                       if not (topo.is_host(l[0]) or topo.is_host(l[1]))]
@@ -97,10 +120,10 @@ def summarize(topo, routing):
          % (len(topo.links), host_links, fabric_links, 400, engine.LINK_DELAY_NS // 1000)),
         ("diameter", "%d switch hops between the furthest hosts" % routing.diameter_switch_hops()),
         ("source for tests", "%s %s" % (topo.ip(src), topo.name[src])),
-        ("furthest", "%d host(s) at %d switch hops: %s" % (len(furthest), dist - 1, ips(furthest))),
+        ("furthest", "%d host(s) at %s: %s" % (len(furthest), _hops(dist - 1), ips(furthest))),
         ("  route", routing.route_text(src, far)),
         ("  traverse", routing.traverse_text(src, far)),
-        ("closest", "%d host(s) at %d switch hops: %s" % (len(closest), cdist - 1, ips(closest))),
+        ("closest", "%d host(s) at %s: %s" % (len(closest), _hops(cdist - 1), ips(closest))),
         ("  route", routing.route_text(src, near)),
         ("  traverse", routing.traverse_text(src, near)),
         ("equal-cost paths", "%d to the furthest host, %d to the closest"
@@ -112,9 +135,11 @@ def summarize(topo, routing):
             if worst and worst[1] > 1 else "; no fabric link outage isolates any host")),
         ("max base RTT", "%.1f us (furthest pair)" % rtt),
         ("OPP task grouping", GROUPING[arch]),
-        ("OP cache / switch", "%d entries = %.1f KB at %d B/entry  [%s]"
+        ("OP cache / switch", formula if entries is None else
+         "%d entries = %.1f KB at %d B/entry  [%s]"
          % (entries, entries * ENTRY_BYTES / 1024.0, ENTRY_BYTES, formula)),
-        ("in-flight probes", "%d per source ToR" % conc),
+        ("in-flight probes", "set by the heuristic's task groups" if conc is None
+         else "%d per source ToR" % conc),
         ("paper scale", PAPER_SCALE[arch]),
     ]
     return info

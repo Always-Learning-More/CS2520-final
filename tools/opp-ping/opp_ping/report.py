@@ -1,6 +1,8 @@
 """Tidy (long-format) CSV of demo results for graphing.
 
-One row per topology x target (furthest/closest) x injected failure x method.
+The demo repeats every case for many runs (default 50) with different random
+draws; the CSV holds one row per topology x target (furthest/closest) x
+injected failure x method, averaged over those runs.
 Methods:
   OPP         OmniPath Ping (this emulator)
   R-Pingmesh  Ping + Traceroute with R-Pingmesh*'s localization heuristics
@@ -15,21 +17,21 @@ import csv
 
 from . import session
 
-COLUMNS = [
-    "seed", "architecture", "size", "hosts", "switches", "links",
-    "source_ip", "source_device", "target", "target_ip", "target_device",
-    "switch_hops", "equal_cost_paths",
-    "failure", "failure_category", "variant", "usm_rate_pct", "injected_link",
-    "blast_radius_hosts",
-    "method", "probes_sent",
-    "detected", "localized", "false_positive",
-    "detection_rate", "localization_rate", "first_detection_at", "first_localization_at",
-    "missed_probes", "wrong_reports",
-    "path_coverage_pct", "full_coverage_rate",
-    "avg_rtt_us", "max_rtt_us",
-    "switch_packets_per_probe", "recirculations_per_probe",
-    "diagnosis",
-]
+# Columns of the averaged CSV. Each row is one topology x target x failure x
+# method, averaged over every demo run (default 50).
+KEY = ("architecture", "target", "failure", "variant", "method")
+CONSTANT = ["architecture", "size", "hosts", "switches", "links",
+            "source_ip", "source_device", "target",
+            "failure", "failure_category", "variant", "usm_rate_pct", "method"]
+DISTINCT = [("distinct_targets", "target_ip"), ("distinct_injected_links", "injected_link")]
+AVERAGED = ["switch_hops", "equal_cost_paths", "blast_radius_hosts",
+            "probes_sent", "detected", "localized", "false_positive",
+            "detection_rate", "localization_rate", "first_detection_at", "first_localization_at",
+            "missed_probes", "wrong_reports",
+            "path_coverage_pct", "full_coverage_rate",
+            "avg_rtt_us", "max_rtt_us",
+            "switch_packets_per_probe", "recirculations_per_probe"]
+COLUMNS = CONSTANT + ["runs"] + [name for name, _ in DISTINCT] + AVERAGED
 
 METHODS = ("OPP", "R-Pingmesh", "Ping", "RD-Probe")
 
@@ -38,10 +40,9 @@ def _r(x, nd=4):
     return "" if x is None else round(x, nd)
 
 
-def context_row(seed, topo, rt, src, dst, target, fail, variant, usm_rate):
+def context_row(topo, rt, src, dst, target, fail, variant, usm_rate):
     lost = rt.cut_off_hosts(src, fail.switch, fail.neighbor) if fail.kind != "none" else []
     return {
-        "seed": seed,
         "architecture": topo.arch,
         "size": list(topo.params.values())[0],
         "hosts": topo.num_hosts,
@@ -204,10 +205,53 @@ def baseline_rows(ctx, topo, rt, fail, rep):
     return rows
 
 
+def aggregate(rows):
+    """Average per-run rows into one row per KEY.
+
+    - CONSTANT columns are copied (they are the same in every run).
+    - DISTINCT columns count how many different target hosts / injected links
+      the runs used (targets are random among equally far/close hosts).
+    - AVERAGED columns are the mean over the runs that have a value. 0/1
+      columns therefore become fractions of runs (e.g. detected = 0.9 means
+      9 out of 10 runs detected the failure). first_*_at is averaged only over
+      the runs where the event happened.
+    """
+    groups, order = {}, []
+    for row in rows:
+        key = tuple(row[k] for k in KEY)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(row)
+    out = []
+    for key in order:
+        runs = groups[key]
+        agg = {c: runs[0].get(c, "") for c in CONSTANT}
+        agg["runs"] = len(runs)
+        for name, source in DISTINCT:
+            values = {r.get(source, "") for r in runs} - {""}
+            agg[name] = len(values) if values else ""
+        for col in AVERAGED:
+            values = [float(r[col]) for r in runs if r.get(col, "") != ""]
+            agg[col] = round(sum(values) / len(values), 4) if values else ""
+        out.append(agg)
+    return out
+
+
 def write_csv(path, rows):
+    """Write rows (already aggregated) to path, replacing any existing file."""
     with open(path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=COLUMNS, lineterminator="\n")
+        w = csv.DictWriter(f, fieldnames=COLUMNS, lineterminator="\n", extrasaction="ignore")
         w.writeheader()
         for row in rows:
             w.writerow({k: row.get(k, "") for k in COLUMNS})
 
+
+def localization_table(agg_rows):
+    """{(architecture, method): mean 'localized'} over the failure cases."""
+    cells = {}
+    for r in agg_rows:
+        if r["failure"] == "none" or r["variant"] == "native" or r["localized"] == "":
+            continue
+        cells.setdefault((r["architecture"], r["method"]), []).append(r["localized"])
+    return {k: sum(v) / len(v) for k, v in cells.items()}

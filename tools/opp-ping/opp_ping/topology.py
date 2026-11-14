@@ -6,7 +6,7 @@ switches), so node ids, port numbers and IP addresses agree with the ns-3
 simulator. The test-suite checks this against the repo files.
 
 IP addresses follow the simulator's node_id_to_ip():
-    ip = 11.(id // 256).(id % 256).1
+    ip = 11.(id // 256).(id % 256).1, rolling over into 12.X.Y.1 past id 65,535
 """
 
 import pathlib
@@ -19,8 +19,11 @@ LINK_DELAY_NS = 1000
 
 
 def node_id_to_ip(node_id):
-    """Same mapping as scratch/third.cc node_id_to_ip()."""
-    return "11.%d.%d.1" % (node_id // 256, node_id % 256)
+    """Same 32-bit arithmetic as scratch/third.cc node_id_to_ip():
+    0x0b000001 + (id / 256) * 0x10000 + (id % 256) * 0x100.
+    Ids up to 65,535 give 11.X.Y.1; larger ids roll over into 12.X.Y.1 etc."""
+    v = 0x0b000001 + (node_id // 256) * 0x10000 + (node_id % 256) * 0x100
+    return "%d.%d.%d.%d" % (v >> 24 & 0xff, v >> 16 & 0xff, v >> 8 & 0xff, v & 0xff)
 
 
 def ip_to_node_id(ip):
@@ -28,9 +31,10 @@ def ip_to_node_id(ip):
     if len(parts) != 4 or not all(p.isdigit() for p in parts):
         raise ValueError("not an IPv4 address: %r" % ip)
     a, b, c, d = (int(p) for p in parts)
-    if a != 11 or d != 1 or b > 255 or c > 255:
+    if a < 11 or d != 1 or b > 255 or c > 255 or a > 255:
         raise ValueError("%s is not a simulator address (expected 11.X.Y.1)" % ip)
-    return b * 256 + c
+    v = (a << 24 | b << 16 | c << 8 | d) - 0x0b000001
+    return (v >> 16) * 256 + (v >> 8 & 0xff)
 
 
 class Topology(object):
@@ -301,6 +305,103 @@ def ot_purdue(n):
     return t
 
 
+def _global_links(t, groups, routers, h):
+    """Wire one global link between every pair of groups (consecutive
+    arrangement): in group i, global link l = 0..a*h-1 leaves router l // h and
+    goes to group (i + l + 1) mod g. ``routers[i]`` lists group i's routers."""
+    g = len(groups)
+    for i in range(g):
+        for j in range(i + 1, g):
+            d = j - i
+            a_side = routers[i][(d - 1) // h]
+            b_side = routers[j][(g - d - 1) // h]
+            t.add_link(a_side, b_side)
+
+
+def dragonfly(a, h=None, p=None):
+    """Dragonfly: g = a*h + 1 groups of ``a`` switches. Switches in a group are
+    wired all-to-all (local links); every switch has ``h`` global links and
+    ``p`` hosts; each pair of groups shares exactly one global link.
+
+    --size a uses h = a - 1 and p = a / 2 (a=4: 13 groups, 52 switches, 104
+    hosts). The paper's Table 6 configuration is a=16, h=8, p=8
+    (129 groups, 2,064 switches, 16,512 hosts): use size "paper".
+    """
+    if h is None:
+        h = a - 1
+    if p is None:
+        p = a // 2
+    if a < 2 or h < 1 or p < 1:
+        raise ValueError("dragonfly needs a >= 2 switches per group, h >= 1, p >= 1")
+    g = a * h + 1
+    t = Topology("dragonfly", {"a": a, "h": h, "p": p, "groups": g}, g * a * p)
+    for grp in range(g):
+        for sw in range(a):
+            for i in range(p):
+                n = len(t.kind)
+                t.add_node(HOST, "host", "host-%d" % n, {"group": grp, "switch": sw})
+    routers = []
+    for grp in range(g):
+        routers.append([t.add_node(SWITCH, "router", "df-g%d-s%d" % (grp, sw),
+                                   {"group": grp, "index": sw}) for sw in range(a)])
+    for grp in range(g):
+        for sw in range(a):
+            for i in range(p):
+                t.add_link((grp * a + sw) * p + i, routers[grp][sw])
+    for grp in range(g):                       # local all-to-all inside each group
+        for x in range(a):
+            for y in range(x + 1, a):
+                t.add_link(routers[grp][x], routers[grp][y])
+    _global_links(t, range(g), routers, h)
+    return t
+
+
+def dragonfly_plus(s, h=None, p=None, leaves=None):
+    """Dragonfly+: g = s*h + 1 groups; each group is a leaf-spine with
+    ``leaves`` leaves and ``s`` spines (full bipartite). Hosts hang off the
+    leaves (``p`` each); every spine has ``h`` global links and each pair of
+    groups shares exactly one global link.
+
+    --size s uses leaves = s, h = s / 2 and p = 2 (s=4: 9 groups, 72 switches,
+    72 hosts). The paper's Table 6 configuration is 33 groups of 32 leaves +
+    32 spines with h=1 and 64 hosts per leaf (2,112 switches, 67,584 hosts):
+    use size "paper".
+    """
+    if leaves is None:
+        leaves = s
+    if h is None:
+        h = max(1, s // 2)
+    if p is None:
+        p = 2
+    if s < 2 or leaves < 1 or h < 1 or p < 1:
+        raise ValueError("dragonfly-plus needs s >= 2 spines per group, h >= 1, p >= 1")
+    g = s * h + 1
+    t = Topology("dragonfly-plus", {"s": s, "leaves": leaves, "h": h, "p": p, "groups": g},
+                 g * leaves * p)
+    for grp in range(g):
+        for lf in range(leaves):
+            for i in range(p):
+                n = len(t.kind)
+                t.add_node(HOST, "host", "host-%d" % n, {"group": grp, "leaf": lf})
+    leaf_ids, spine_ids = [], []
+    for grp in range(g):
+        leaf_ids.append([t.add_node(SWITCH, "leaf", "leaf-g%d-%d" % (grp, i),
+                                    {"group": grp, "index": i}) for i in range(leaves)])
+    for grp in range(g):
+        spine_ids.append([t.add_node(SWITCH, "spine", "spine-g%d-%d" % (grp, i),
+                                     {"group": grp, "index": i}) for i in range(s)])
+    for grp in range(g):
+        for lf in range(leaves):
+            for i in range(p):
+                t.add_link((grp * leaves + lf) * p + i, leaf_ids[grp][lf])
+    for grp in range(g):
+        for lf in leaf_ids[grp]:
+            for sp in spine_ids[grp]:
+                t.add_link(lf, sp)
+    _global_links(t, range(g), spine_ids, h)
+    return t
+
+
 # Every model must have at least this many hosts AND switches.
 MIN_HOSTS = 50
 MIN_SWITCHES = 50
@@ -313,6 +414,18 @@ ARCHES = {
     "2d-torus": (torus_2d, "n", 8),          #  64 hosts,  64 switches
     "3d-torus": (torus_3d, "n", 4),          #  64 hosts,  64 switches
     "ot-purdue": (ot_purdue, "n", 12),       #  52 hosts,  51 switches
+    "dragonfly": (dragonfly, "a", 4),        # 104 hosts,  52 switches (13 groups)
+    "dragonfly-plus": (dragonfly_plus, "s", 4),  # 72 hosts, 72 switches (9 groups)
+}
+
+# size="paper" builds the configuration the paper evaluates.
+PAPER_SIZES = {
+    "fat-tree": lambda: fat_tree(64),
+    "leaf-spine": lambda: leaf_spine(64),
+    "2d-torus": lambda: torus_2d(10),
+    "3d-torus": lambda: torus_3d(6),
+    "dragonfly": lambda: dragonfly(16, h=8, p=8),
+    "dragonfly-plus": lambda: dragonfly_plus(32, h=1, p=64, leaves=32),
 }
 
 # (hosts, switches) as a function of size, and whether a size is valid
@@ -322,6 +435,9 @@ COUNTS = {
     "2d-torus": lambda n: (n * n, n * n),
     "3d-torus": lambda n: (n ** 3, n ** 3),
     "ot-purdue": lambda n: (4 + 4 * n, 3 + 4 * n),
+    "dragonfly": lambda a: ((a * (a - 1) + 1) * a * (a // 2), (a * (a - 1) + 1) * a),
+    "dragonfly-plus": lambda s: ((s * max(1, s // 2) + 1) * s * 2,
+                                 (s * max(1, s // 2) + 1) * 2 * s),
 }
 VALID_SIZE = {
     "fat-tree": lambda k: k >= 2 and k % 2 == 0,
@@ -329,6 +445,8 @@ VALID_SIZE = {
     "2d-torus": lambda n: n >= 3,
     "3d-torus": lambda n: n >= 3,
     "ot-purdue": lambda n: n >= 1,
+    "dragonfly": lambda a: a >= 2 and a % 2 == 0,
+    "dragonfly-plus": lambda s: s >= 2 and s % 2 == 0,
 }
 
 ARCH_TITLES = {
@@ -337,6 +455,8 @@ ARCH_TITLES = {
     "2d-torus": "2D torus",
     "3d-torus": "3D torus",
     "ot-purdue": "OT Purdue plant",
+    "dragonfly": "Dragonfly",
+    "dragonfly-plus": "Dragonfly+",
 }
 
 # Topology files shipped in the repo, keyed by (arch, size).
@@ -369,9 +489,14 @@ def minimum_size(arch):
 
 def generate(arch, size=None):
     """Build any size, without the 50-host / 50-switch floor (used for unit tests
-    of small shapes and for comparing against the repo's smaller topology files)."""
+    of small shapes and for comparing against the repo's smaller topology files).
+    size may be an int, None (default) or "paper"."""
     if arch not in ARCHES:
         raise ValueError("unknown architecture %r (choose from %s)" % (arch, ", ".join(ARCHES)))
+    if size == "paper":
+        if arch not in PAPER_SIZES:
+            raise ValueError("%s is not in the paper; it has no paper size" % arch)
+        return PAPER_SIZES[arch]()
     fn, _, default = ARCHES[arch]
     return fn(default if size is None else size)
 
@@ -380,6 +505,8 @@ def build(arch, size=None):
     """Build a model; refuses sizes below 50 hosts or 50 switches."""
     if arch not in ARCHES:
         raise ValueError("unknown architecture %r (choose from %s)" % (arch, ", ".join(ARCHES)))
+    if size == "paper":
+        return generate(arch, "paper")
     _, param, default = ARCHES[arch]
     size = default if size is None else size
     if not VALID_SIZE[arch](size):

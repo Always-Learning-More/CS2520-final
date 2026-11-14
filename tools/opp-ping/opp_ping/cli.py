@@ -113,7 +113,7 @@ def _blast_radius(topo, rt, src, fail):
         return None
     lost = rt.cut_off_hosts(src, fail.switch, fail.neighbor)
     if not lost:
-        return "if %s - %s went down, every host could still reach %s (redundant paths)" % (
+        return "if %s - %s went down, every host could still reach %s over alternative paths" % (
             topo.name[fail.switch], topo.name[fail.neighbor], topo.name[src])
     return "if %s - %s went down, %d host(s) would lose contact with %s: %s" % (
         topo.name[fail.switch], topo.name[fail.neighbor], len(lost), topo.name[src],
@@ -292,54 +292,196 @@ DEMO_CASES = [
 ]
 
 
+DEFAULT_CSV = "opp_ping_demo.csv"
+
+
+FULL_DEMO_RUNS = 50
+
+
+def demo_mode(args):
+    """Return (runs, individual).
+
+    A full demo (no --target, --arch, --src or --runs) repeats every case
+    FULL_DEMO_RUNS times and prints only the averaged results. Narrowing it
+    with any of those options makes it an individual run: one run, printed
+    case by case. An explicit --runs N > 1 always averages.
+    """
+    narrowed = args.target is not None or args.arch != "all" or args.src is not None
+    runs = args.runs if args.runs is not None else (1 if narrowed else FULL_DEMO_RUNS)
+    return runs, runs == 1
+
+
 def cmd_demo(args):
-    rng = _seed(args)
+    import time
+    _seed(args)
+    runs, individual = demo_mode(args)
     usm_rate = args.usm_rate / 100.0
-    targets = ["furthest", "closest"] if args.target == "both" else [args.target]
+    targets = ["furthest", "closest"] if args.target in (None, "both") else [args.target]
     if args.csv is None:
-        args.csv = "opp_ping_demo_seed%d.csv" % args.seed
-    rows = []
-    print("opp-ping demo: %d OPP probes per case (USM %.0f%% unless noted), %d baseline pings, "
-          "targets: %s, seed %d" % (args.probes, usm_rate * 100, args.baseline,
-                                    " + ".join(targets), args.seed))
+        # averaged results go to the default CSV; an individual run writes a CSV
+        # only when asked, so it never replaces the averaged file by accident
+        args.csv = "" if individual else DEFAULT_CSV
+    models = []
     for arch, size in _arches(args):
         topo, rt = _build(arch, size)
         src = _resolve_host(topo, args.src, "source") if args.src else archinfo.default_source(topo)
-        entries, conc, _ = archinfo.op_cache(arch, list(topo.params.values())[0])
-        print()
-        print("=" * 100)
-        print("%s | %d hosts, %d switches | source %s %s"
-              % (topo.describe(), topo.num_hosts, topo.num_nodes - topo.num_hosts,
-                 topo.ip(src), topo.name[src]))
-        print("OP cache %d entries/switch (%.1f KB), %d in-flight probe(s) per source switch"
-              % (entries, entries * archinfo.ENTRY_BYTES / 1024.0, conc))
-        print("=" * 100)
-        for target in targets:
-            dst, candidates, dist = rt.pick_target(src, target, rng)
-            print()
-            print("--- %s device from %s: %s %s ---" % (target.upper(), topo.ip(src),
-                                                      topo.ip(dst), topo.name[dst]))
-            _print_kv(_target_rows(topo, rt, src, dst, target, candidates, dist), indent="    ")
-            for kind, forced in DEMO_CASES:
-                rows.extend(_demo_case(args, topo, rt, src, dst, target, kind, forced, usm_rate))
+        models.append((topo, rt, src))
+    if individual:
+        print("opp-ping demo (individual run): %d OPP probes per case (USM %.0f%% unless noted), "
+              "%d baseline pings, targets: %s, seed %d"
+              % (args.probes, usm_rate * 100, args.baseline, " + ".join(targets), args.seed))
+    else:
+        print("opp-ping demo: %d runs of every case, averaged; %d OPP probes per case (USM %.0f%% "
+              "unless noted), %d baseline pings; base seed %d"
+              % (runs, args.probes, usm_rate * 100, args.baseline, args.seed))
+    show_progress = not individual and sys.stderr.isatty()
+    rows = []
+    started = time.time()
+    for run in range(runs):
+        seed = args.seed + run
+        rng = random.Random(seed)
+        for topo, rt, src in models:
+            if individual:
+                _demo_header(topo, src)
+            for target in targets:
+                dst, candidates, dist = rt.pick_target(src, target, rng)
+                if individual:
+                    print()
+                    print("--- %s device from %s: %s %s ---" % (target.upper(), topo.ip(src),
+                                                              topo.ip(dst), topo.name[dst]))
+                    _print_kv(_target_rows(topo, rt, src, dst, target, candidates, dist),
+                              indent="    ")
+                for kind, forced in DEMO_CASES:
+                    rows.extend(_demo_case(args, seed, topo, rt, src, dst, target, kind, forced,
+                                           usm_rate, individual))
+        if show_progress:
+            sys.stderr.write("\r  run %d/%d (%.0f s)" % (run + 1, runs, time.time() - started))
+            sys.stderr.flush()
+    if show_progress:
+        sys.stderr.write("\r" + " " * 40 + "\r")
+    agg = report.aggregate(rows)
+    if not individual:
+        for topo, rt, src in models:
+            _print_averaged(topo, rt, src, agg, runs, targets)
+    _print_summary(agg, runs, targets)
     if args.csv:
-        report.write_csv(args.csv, rows)
+        report.write_csv(args.csv, agg)
         print()
-        print("wrote %d rows to %s (one row per topology x target x failure x method)"
-              % (len(rows), args.csv))
+        print("wrote %d rows to %s, averaged over %d run(s) (one row per topology x target x "
+              "failure x method; any previous file was overwritten)"
+              % (len(agg), args.csv, runs))
     return 0
 
 
-def _demo_case(args, topo, rt, src, dst, target, kind, forced, usm_rate):
-    # per-(arch, target, failure) seed: both loop cases share the same placement
-    case_rng = random.Random("%d-%s-%s-%s" % (args.seed, topo.arch, target, kind))
+CASE_LABELS = [
+    (("none", "default"), "none (false pos.)"),
+    (("acl-drop", "default"), "acl-drop"),
+    (("loop", "usm"), "loop (USM)"),
+    (("loop", "native"), "loop (native only)"),
+    (("link-flap", "default"), "link-flap"),
+    (("congestion", "default"), "congestion"),
+    (("port-down", "default"), "port-down"),
+]
+
+
+def _print_averaged(topo, rt, src, agg, runs, targets):
+    """Averaged results for one architecture: per target, per failure case,
+    the fraction of runs in which each method localized the failure (for the
+    healthy case: the fraction of runs with a false positive)."""
+    mine = [r for r in agg if r["architecture"] == topo.arch]
+    if not mine:
+        return
+    cell = {(r["target"], r["failure"], r["variant"], r["method"]): r for r in mine}
+    print()
+    print("=" * 100)
+    print("%s: %d hosts, %d switches, source %s %s -- averaged over %d runs"
+          % (topo.describe(), topo.num_hosts, topo.num_nodes - topo.num_hosts,
+             topo.ip(src), topo.name[src], runs))
+    print("=" * 100)
+    head = "%-20s" % "fraction localized"
+    sub = "%-20s" % ""
+    for target in targets:
+        sample = next(r for r in mine if r["target"] == target)
+        n_targets = sample["distinct_targets"] or 1
+        head += "| %-46s" % ("%s (%s, %s, %d target%s)"
+                             % (target, _plural(sample["switch_hops"], "sw hop"),
+                                _plural(sample["equal_cost_paths"], "path"),
+                                n_targets, "" if n_targets == 1 else "s"))
+        sub += "| " + "".join("%11s" % m for m in report.METHODS) + "  "
+    print(head)
+    print(sub)
+    for (failure, variant), label in CASE_LABELS:
+        line = "%-20s" % label
+        for target in targets:
+            vals = ""
+            for m in report.METHODS:
+                r = cell.get((target, failure, variant, m))
+                col = "false_positive" if failure == "none" else "localized"
+                vals += "%11s" % ("-" if r is None or r[col] == "" else "%.2f" % r[col])
+            line += "| " + vals + "  "
+        print(line)
+
+
+def _plural(x, word):
+    text = _fmt_num(x)
+    return "%s %s%s" % (text, word, "" if text == "1" else "s")
+
+
+def _fmt_num(x):
+    if x == "":
+        return "-"
+    return ("%d" % x) if float(x).is_integer() else ("%.1f" % x)
+
+
+def _demo_header(topo, src):
+    entries, conc, _ = archinfo.op_cache(topo.arch, list(topo.params.values())[0])
+    print()
+    print("=" * 100)
+    print("%s | %d hosts, %d switches | source %s %s"
+          % (topo.describe(), topo.num_hosts, topo.num_nodes - topo.num_hosts,
+             topo.ip(src), topo.name[src]))
+    if entries is None:
+        print("OP cache: no closed-form size in the paper (see solver/unit-merge)")
+    else:
+        print("OP cache %d entries/switch (%.1f KB), %d in-flight probe(s) per source switch"
+              % (entries, entries * archinfo.ENTRY_BYTES / 1024.0, conc))
+    print("=" * 100)
+
+
+def _print_summary(agg, runs, targets):
+    table = report.localization_table(agg)
+    archs = []
+    for r in agg:
+        if r["architecture"] not in archs:
+            archs.append(r["architecture"])
+    print()
+    print("--- overall: fraction of failure cases localized, %s (acl-drop, loop with USM, "
+          "link-flap, congestion, port-down; %s) ---"
+          % ("this run" if runs == 1 else "averaged over %d runs" % runs,
+             "both targets" if len(targets) == 2 else "%s target" % targets[0]))
+    print("%-16s" % "architecture" + "".join("%12s" % m for m in report.METHODS))
+    for arch in archs:
+        cells = ["%12s" % ("%.2f" % table[(arch, m)] if (arch, m) in table else "-")
+                 for m in report.METHODS]
+        print("%-16s" % arch + "".join(cells))
+
+
+def _demo_case(args, seed, topo, rt, src, dst, target, kind, forced, usm_rate, verbose):
+    # per-(run, arch, target, failure) seed: both loop cases share the same placement
+    case_rng = random.Random("%d-%s-%s-%s" % (seed, topo.arch, target, kind))
     fail = failures.place(kind, topo, rt, src, dst, case_rng, **_demo_params(args))
     rate = usm_rate if forced is None else forced
     label = kind if forced is None else "%s (%s)" % (kind, "USM" if forced else "native only")
     results = session.Session(topo, rt, fail, case_rng, src, dst).run(args.probes, rate)
     variant = "default" if forced is None else ("usm" if forced else "native")
-    ctx = report.context_row(args.seed, topo, rt, src, dst, target, fail, variant, rate)
+    ctx = report.context_row(topo, rt, src, dst, target, fail, variant, rate)
     rows = [report.opp_row(ctx, topo, fail, results, _finding_text)]
+    rep = None
+    if args.baseline and forced != 0.0:
+        rep = baseline.run(topo, rt, fail, case_rng, src, dst, args.baseline)
+        rows.extend(report.baseline_rows(ctx, topo, rt, fail, rep))
+    if not verbose:
+        return rows
     t = session.tally(results)
     first = next((r.index for r in results if r.verdict == "detected"), None)
     reports = {}
@@ -367,12 +509,10 @@ def _demo_case(args, topo, rt, src, dst, target, kind, forced, usm_rate):
     if mis:
         print("    loop pinned: %s (%d/%d probes)"
               % (topo.name[mis[0].misconfigured_switch], len(mis), args.probes))
-    if args.baseline and forced != 0.0:
-        rep = baseline.run(topo, rt, fail, case_rng, src, dst, args.baseline)
+    if rep is not None:
         for line in baseline.summary_lines(topo, rep):
             if line.startswith(("R-Pingmesh", "RD-Probe", "Ping:")) or "paths covered" in line:
                 print("    " + line.strip())
-        rows.extend(report.baseline_rows(ctx, topo, rt, fail, rep))
     return rows
 
 
@@ -382,15 +522,26 @@ def _demo_params(args):
 
 
 # ---------------------------------------------------------------- parsing
+def _size_arg(text):
+    if text == "paper":
+        return "paper"
+    try:
+        return int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError("size must be an integer or 'paper'")
+
+
 def _add_topology_args(p, allow_all=False):
     choices = ARCH_CHOICES + (["all"] if allow_all else [])
     p.add_argument("--arch", choices=choices, default="all" if allow_all else "fat-tree",
                    help="architecture (default: %s)" % ("all" if allow_all else "fat-tree"))
-    p.add_argument("--size", "-k", type=int, default=None,
-                   help="k for fat-tree/leaf-spine, n for n x n (x n) tori, chain length "
-                        "for ot-purdue. Every model needs >= 50 hosts and >= 50 switches; "
-                        "defaults are the smallest such sizes: fat-tree 8, leaf-spine 34, "
-                        "2d-torus 8, 3d-torus 4, ot-purdue 12")
+    p.add_argument("--size", "-k", type=_size_arg, default=None,
+                   help="k for fat-tree/leaf-spine, n for n x n (x n) tori, chain length for "
+                        "ot-purdue, switches per group (a) for dragonfly, spines per group (s) "
+                        "for dragonfly-plus, or 'paper' for the paper's evaluated size. Every "
+                        "model needs >= 50 hosts and >= 50 switches; defaults are the smallest "
+                        "such sizes: fat-tree 8, leaf-spine 34, 2d-torus 8, 3d-torus 4, "
+                        "ot-purdue 12, dragonfly 4, dragonfly-plus 4")
 
 
 def _add_failure_tuning(p):
@@ -444,11 +595,16 @@ def build_parser():
     p = sub.add_parser("demo", help="run every failure type on every architecture")
     _add_topology_args(p, allow_all=True)
     p.add_argument("--probes", type=int, default=10, help="OPP probes per case (default 10)")
-    p.add_argument("--target", choices=["both", "furthest", "closest"], default="both",
-                   help="which target(s) to probe (default both)")
+    p.add_argument("--target", choices=["both", "furthest", "closest"], default=None,
+                   help="which target(s) to probe; giving it (or --arch/--src) makes this an "
+                        "individual run printed case by case")
     p.add_argument("--src", help="source host (default 11.0.0.1; 11.0.11.1 on ot-purdue)")
+    p.add_argument("--runs", type=int, default=None,
+                   help="runs to average (default: 50 for the full demo, 1 when --target, "
+                        "--arch or --src narrow it); with 1 run every case is printed")
     p.add_argument("--csv", metavar="PATH", default=None,
-                   help="CSV file for the results (default opp_ping_demo_seed<SEED>.csv)")
+                   help="CSV file for the averaged results, overwritten each time (default "
+                        "opp_ping_demo.csv; individual runs write one only when --csv is given)")
     p.add_argument("--no-csv", dest="csv", action="store_const", const="",
                    help="do not write a CSV")
     p.add_argument("--usm-rate", type=float, default=10.0, help="%% USM probes (default 10)")
@@ -466,8 +622,9 @@ def main(argv=None):
     if not getattr(args, "func", None):
         parser.print_help()
         return 1
-    if getattr(args, "count", 1) < 1 or getattr(args, "probes", 1) < 1:
-        raise SystemExit("error: probe counts must be >= 1")
+    if (getattr(args, "count", 1) < 1 or getattr(args, "probes", 1) < 1
+            or (getattr(args, "runs", None) or 1) < 1 or getattr(args, "runs", None) == 0):
+        raise SystemExit("error: probe and run counts must be >= 1")
     try:
         return args.func(args)
     except BrokenPipeError:            # e.g. piped into head

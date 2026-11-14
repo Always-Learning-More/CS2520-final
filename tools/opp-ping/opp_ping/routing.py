@@ -144,11 +144,25 @@ class Routing(object):
         return rng.choice(candidates), candidates, distance
 
     SYMMETRIC = ("fat-tree", "leaf-spine", "2d-torus", "3d-torus")
+    GROUP_SYMMETRIC = ("dragonfly", "dragonfly-plus")
 
     def diameter_switch_hops(self):
         """Max switch hops between any two hosts. Host 0 is representative in
-        the symmetric topologies; otherwise every host is checked."""
-        sources = [0] if self.topo.arch in self.SYMMETRIC else list(self.topo.hosts)
+        the symmetric topologies; in the Dragonfly family the groups are
+        rotations of each other, so one host per switch of group 0 suffices;
+        otherwise every host is checked."""
+        topo = self.topo
+        if topo.arch in self.SYMMETRIC:
+            sources = [0]
+        elif topo.arch in self.GROUP_SYMMETRIC:
+            seen, sources = set(), []
+            for h in topo.hosts:
+                sw = topo.attached_switch(h)
+                if topo.coord[sw]["group"] == 0 and sw not in seen:
+                    seen.add(sw)
+                    sources.append(h)
+        else:
+            sources = list(topo.hosts)
         return max(self.furthest_hosts(h)[1] for h in sources) - 1
 
     # ------------------------------------------------------- route description
@@ -186,11 +200,13 @@ class Routing(object):
         topo = self.topo
         layers = self.hop_layers(src, dst)
         hops = len(layers)
-        if topo.arch in ("2d-torus", "3d-torus"):
-            return "%d switch hops: %s" % (hops, self._torus_moves(src, dst))
         if hops == 1:
             return "1 switch hop: both hosts hang off %s, so traffic never leaves it" \
                    % topo.name[layers[0][0]]
+        if topo.arch in ("2d-torus", "3d-torus"):
+            return "%d switch hops: %s" % (hops, self._torus_moves(src, dst))
+        if topo.arch in self.GROUP_SYMMETRIC:
+            return "%d switch hops: %s" % (hops, self._group_moves(src, dst, layers))
         height = [self._height(l[0]) for l in layers]
         peak = max(range(hops), key=lambda i: (height[i], -i))
         if peak == 0:                     # the source switch is the highest point
@@ -236,6 +252,34 @@ class Routing(object):
             core = next(s for s in topo.switches if topo.tier[s] == "core")
             return -self.hops(switch, core) if switch != core else 0
         return {"tor": 1, "leaf": 1, "agg": 2, "spine": 2, "core": 3}.get(topo.tier[switch], 0)
+
+    def _group_moves(self, src, dst, layers):
+        """Dragonfly family: describe the route as local hops inside groups and
+        the global link(s) between them."""
+        topo = self.topo
+        layer_groups = [{topo.coord[x]["group"] for x in layer} for layer in layers]
+        first, last = layer_groups[0].pop(), layer_groups[-1].pop()
+        if any(len(g) > 1 for g in layer_groups):
+            # equal-cost paths through different intermediate groups
+            middle = sorted(set().union(*layer_groups[1:-1]) - {first, last})
+            return ("%d equal-cost paths from group %d to group %d, either directly or "
+                    "through intermediate group%s %s (two global links)"
+                    % (self.path_count(src, dst), first, last, "s" if len(middle) > 1 else "",
+                       ", ".join(str(g) for g in middle)))
+        parts, current, run = [], None, []
+        for layer, groups in zip(layers, layer_groups):
+            grp = groups.pop() if groups else topo.coord[layer[0]]["group"]
+            word = self._layer_word(layer) if len(layer) > 1 else topo.name[layer[0]]
+            if grp != current:
+                if run:
+                    parts.append("in group %d: %s" % (current, " -> ".join(run)))
+                    parts.append("global link to group %d" % grp)
+                current, run = grp, []
+            run.append(word)
+        parts.append("in group %d: %s" % (current, " -> ".join(run)))
+        if len(parts) == 1:
+            parts[0] += " (never leaves the group)"
+        return "; ".join(parts)
 
     def _torus_moves(self, src, dst):
         topo = self.topo

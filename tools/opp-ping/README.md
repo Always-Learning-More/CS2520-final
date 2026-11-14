@@ -1,8 +1,9 @@
 # opp-ping: OmniPath Ping from the command line
 
 `opp-ping` is a ping-style tool for exploring OmniPath Ping (OPP) on the four
-architectures from the paper, plus an OT plant network with no redundancy
-(`ot-purdue`, see [below](#the-ot-network-ot-purdue)). You give it a source host IP. It
+architectures from the paper's ns-3 evaluation, the two Dragonfly variants
+from its Table 6 ([below](#dragonfly-and-dragonfly)), and an OT plant network
+with no redundancy (`ot-purdue`, see [below](#the-ot-network-ot-purdue)). You give it a source host IP. It
 probes the **furthest** host from that source (or the **closest** with
 `--target closest`), choosing at random among equally distant hosts,
 optionally with an injected failure, and prints what OPP reports. It can also
@@ -25,7 +26,8 @@ paper's numbers.
 
 Topologies, node ids, port numbers and IP addresses match the repo's ns-3
 topology files exactly; the tests check this link by link. As in the
-simulator, a host's IP is `11.(id // 256).(id % 256).1`.
+simulator, a host's IP is `11.(id // 256).(id % 256).1`; past id 65,535 the
+simulator's 32-bit arithmetic rolls over into `12.X.Y.1`.
 
 ## Quick start
 
@@ -41,8 +43,11 @@ tools/opp-ping/opp-ping ping 11.0.0.1 --arch 3d-torus --failure link-flap -c 20
 tools/opp-ping/opp-ping ping 11.0.0.1 --failure port-down -c 1 --trace   # switch-by-switch log
 tools/opp-ping/opp-ping ping 11.0.11.1 --arch ot-purdue --target closest --failure port-down
 tools/opp-ping/opp-ping ping 11.0.11.1 --arch ot-purdue --failure loop --usm -c 5
-tools/opp-ping/opp-ping demo                       # every failure, every architecture, both targets + CSV
+tools/opp-ping/opp-ping demo                       # 50 runs of every case: averaged results + CSV
+tools/opp-ping/opp-ping demo --target closest      # one individual run, printed case by case
 tools/opp-ping/opp-ping demo --arch ot-purdue      # just the OT network
+tools/opp-ping/opp-ping ping 11.0.0.1 --arch dragonfly --failure port-down
+tools/opp-ping/opp-ping info --arch dragonfly-plus --size paper   # the paper's 67,584-host size
 ```
 
 To call it as just `opp-ping`, add it to your PATH:
@@ -59,15 +64,21 @@ ln -s "$PWD/tools/opp-ping/opp-ping" ~/.local/bin/opp-ping
 | `info` | Shows general information per architecture: hosts and switches per tier, links, IP range, diameter, equal-cost paths, ECMP fan-out, base RTT, OPP task grouping, and OP cache size per switch from the paper's formulas. |
 | `hosts` | Lists host IPs with the switch each host is attached to and its position. |
 | `failures` | Lists the failure types. |
-| `demo` | For each architecture and for both targets (furthest and closest), shows the target's IP, route and traversal, then runs every failure type (loop twice: with USM and with native multicast only) and prints OPP's results next to the baselines. `--target furthest` or `--target closest` limits it to one; `--src IP` changes the source. |
+| `demo` | Runs every failure type (loop twice: with USM and with native multicast only) on every architecture and both targets (furthest and closest). The full demo repeats this **50 times** with new random draws and prints **only the averaged results**: one table per architecture, then an overall table, plus the CSV. Narrowing it with `--target furthest\|closest`, `--arch`, `--src` or `--runs 1` turns it into an **individual run**: one run, printed case by case with target IPs, routes and traversals. |
 
 ### Choosing the architecture
 
-Use `--arch fat-tree|leaf-spine|2d-torus|3d-torus|ot-purdue` and `--size`:
+Use `--arch fat-tree|leaf-spine|2d-torus|3d-torus|ot-purdue|dragonfly|dragonfly-plus`
+and `--size`:
 
 - `--size` is **k** for fat-tree and leaf-spine (radix-k switches).
 - `--size` is **n** for an n×n or n×n×n torus.
 - `--size` is the **chain length n** for `ot-purdue`.
+- `--size` is the **switches per group a** for `dragonfly` and the **spines per
+  group s** for `dragonfly-plus`.
+- `--size paper` builds the size the paper evaluates: fat-tree k=64,
+  leaf-spine k=64, 10×10 and 6×6×6 tori, and the Table 6 Dragonfly
+  configurations. The OT network isn't in the paper, so it has no paper size.
 - **Every model has at least 50 hosts and 50 switches.** Smaller sizes are
   rejected with a message naming the smallest allowed size.
 - The defaults are the smallest sizes that meet that floor:
@@ -79,6 +90,8 @@ Use `--arch fat-tree|leaf-spine|2d-torus|3d-torus|ot-purdue` and `--size`:
   | 2d-torus | 8×8 | 64 | 64 |
   | 3d-torus | 4×4×4 | 64 | 64 |
   | ot-purdue | chains of 12 | 52 | 51 |
+  | dragonfly | a=4 (13 groups) | 104 | 52 |
+  | dragonfly-plus | s=4 (9 groups) | 72 | 72 |
 - Paper scale works too, e.g. `--size 64` for the 65,536-host fat-tree. One
   probe there takes about a second.
 
@@ -138,6 +151,7 @@ it up:
   switch's downlink into the target's cell.
 - **Loops:** a switch that has an off-path neighbor to misroute to.
 - **Tori:** a multi-path switch.
+- **Dragonfly and Dragonfly+:** a global (inter-group) link on the path.
 - **Closest targets on the same switch:** the switch's link to the target.
 
 When a failure is injected, a `blast radius` line lists the hosts that would
@@ -160,6 +174,42 @@ paths is flagged and stays invisible to the probe.
 
 Only USM probes consult the unicast table, so only they can expose a loop
 (paper Figure 8b).
+
+## Dragonfly and Dragonfly+
+
+These come from the paper's Table 6, where they only appear in the task-grouping
+analysis. The ns-3 evaluation doesn't use them, so there are no repo topology
+files to check them against.
+
+- **`dragonfly`:** g = a·h + 1 groups of `a` switches. Switches inside a group
+  are wired all-to-all, each switch has `h` global links and `p` hosts, and
+  every pair of groups shares exactly one global link. `--size a` uses
+  h = a − 1 and p = a / 2. The default a=4 gives 13 groups, 52 switches and
+  104 hosts; `--size paper` is a=16, h=8, p=8 (129 groups, 16,512 hosts).
+- **`dragonfly-plus`:** g = s·h + 1 groups, each a small leaf-spine (s leaves
+  and s spines, fully connected). Hosts hang off the leaves and the spines
+  carry the global links. `--size s` uses h = s / 2 and 2 hosts per leaf. The
+  default s=4 gives 9 groups, 72 switches and 72 hosts; `--size paper` is 33
+  groups of 32 leaves + 32 spines with 64 hosts per leaf (67,584 hosts).
+
+Global links are wired in the usual "consecutive" arrangement, and switch
+names give the group: `df-g3-s1`, `leaf-g3-0`, `spine-g3-2`. The `traverse`
+line describes routes as local hops inside a group plus the global links
+between groups.
+
+**What to expect under the paper's shortest-path routing:**
+
+- **Dragonfly:** just over half of the furthest hosts are reached over a
+  single path. The rest have 2–7 equally short paths, because going through an
+  intermediate group (two global links) is as short as
+  local → global → local.
+- **Dragonfly+:** every furthest host has exactly one path, because only one
+  spine in the source group owns the global link to each destination group.
+- **No fabric link is a single point of failure in either.**
+- **No OP cache size in `info`.** The paper has no closed-form formula for
+  these, so `info` points to the Rust solver instead
+  (`bash scripts/reproduce_six_tor_scope.sh dragonfly` in `solver/unit-merge`),
+  which reproduces Table 6's 4,096 entries per switch.
 
 ## The OT network (`ot-purdue`)
 
@@ -254,40 +304,69 @@ runs Traceroute with N probes per TTL. It then prints:
 
 ## Demo CSV (for graphs)
 
-`demo` always writes a tidy, long-format CSV next to its printed output, to
-`opp_ping_demo_seed<SEED>.csv` in the current directory. `--csv PATH` picks
-another file and `--no-csv` turns it off.
+The full `demo` repeats every case **50 times**. Each run draws new random
+choices: which of the equally far/close hosts is the target, where the failure
+goes, packet spraying, and flap drops. The runs use seeds `--seed`,
+`--seed`+1, and so on, so the whole batch is reproducible.
+
+Only the end results are printed:
+
+- **One table per architecture:** for the furthest and the closest target,
+  each failure case, and each method, the fraction of runs in which the
+  method localized the failure. The healthy row shows false positives
+  instead.
+- **An overall table** across architectures.
+
+The runs can be changed two ways:
+
+- **`--runs N`** averages over N runs instead of 50.
+- **Narrowing options** (`--target`, `--arch`, `--src`, or `--runs 1`) give
+  one individual run with every case printed.
+
+The results are averaged and written to **`opp_ping_demo.csv`** in the
+current directory. **Every write replaces the previous file**; nothing is
+appended and no per-seed copies are kept. `--csv PATH` picks another file
+and `--no-csv` skips it. An individual run writes a CSV only when you give
+`--csv PATH`, so it never replaces the averaged file by accident.
 
 There is one row per **topology × target (furthest/closest) × injected failure
-× method**. A default run has 5 × 2 × 7 cases, which gives 250 rows. The
+× method**. The default run has 7 × 2 × 7 cases, which gives 350 rows. The
 "native multicast only" loop case has an OPP row only, because the baselines
-don't depend on OPP's multicast mode.
-
-Each column belongs to one of these groups:
+don't depend on OPP's multicast mode. The CSV has no seed column.
 
 | Group | Columns |
 |---|---|
-| Run and topology | `seed`, `architecture`, `size`, `hosts`, `switches`, `links` |
-| Flow | `source_ip`, `source_device`, `target` (furthest/closest), `target_ip`, `target_device`, `switch_hops`, `equal_cost_paths` |
-| Injected issue | `failure` (none, acl-drop, loop, link-flap, congestion, port-down), `failure_category`, `variant` (default, or usm/native for loops), `usm_rate_pct`, `injected_link`, `blast_radius_hosts` |
+| Topology | `architecture`, `size`, `hosts`, `switches`, `links` |
+| Flow | `source_ip`, `source_device`, `target` (furthest/closest), `switch_hops`, `equal_cost_paths` |
+| Injected issue | `failure` (none, acl-drop, loop, link-flap, congestion, port-down), `failure_category`, `variant` (default, or usm/native for loops), `usm_rate_pct`, `blast_radius_hosts` |
 | Method | `method`: OPP, R-Pingmesh (Ping + Traceroute), Ping (plain), RD-Probe (Ping + mirroring) |
-| Outcome | `probes_sent`, `detected`, `localized`, `false_positive` (healthy runs only), `detection_rate`, `localization_rate`, `first_detection_at`, `first_localization_at`, `missed_probes`, `wrong_reports` |
+| Averaging | `runs` (how many runs were averaged), `distinct_targets`, `distinct_injected_links` |
+| Outcome | `probes_sent`, `detected`, `localized`, `false_positive`, `detection_rate`, `localization_rate`, `first_detection_at`, `first_localization_at`, `missed_probes`, `wrong_reports` |
 | Cost and quality | `path_coverage_pct`, `full_coverage_rate`, `avg_rtt_us`, `max_rtt_us`, `switch_packets_per_probe`, `recirculations_per_probe` |
-| Text | `diagnosis` |
 
-What the outcome columns mean:
+How the averages work:
 
-- **`detected` and `localized`** are 0/1 for the whole case.
-- **The `_rate` columns** are per probe.
+- **Every number is the mean over the runs.**
+- **The 0/1 columns become fractions of runs.** For example, `localized` =
+  0.86 means the method localized the failure in 86% of the 50 runs.
+- **`first_detection_at` and `first_localization_at`** are averaged only over
+  the runs where that happened.
+- **The target IP and injected link change from run to run,** so the CSV
+  records how many different ones were used (`distinct_targets`,
+  `distinct_injected_links`) instead of a single value. Run 1's terminal
+  output shows actual examples.
 - **For R-Pingmesh, `probes_sent`** includes the Traceroute probes.
 - **Ping never localizes,** so its `localized` is always 0.
 - **Blank cells** mean "not applicable".
+
+The CSV holds the same averages as the printed tables, plus every other
+metric.
 
 For example, with pandas:
 
 ```python
 import pandas as pd
-df = pd.read_csv("opp_ping_demo_seed21.csv")
+df = pd.read_csv("opp_ping_demo.csv")
 faults = df[(df.failure != "none") & (df.variant != "native")]
 faults.pivot_table(index=["architecture", "target"], columns="method",
                    values="localized", aggfunc="mean")
@@ -297,7 +376,7 @@ faults.pivot_table(index=["architecture", "target"], columns="method",
 
 ```bash
 cd tools/opp-ping
-python3 -m unittest discover -s tests -v          # 80 tests, about 3 s
+python3 -m unittest discover -s tests -v          # 98 tests, about 3 s
 ```
 
 The suite covers:
@@ -324,9 +403,26 @@ The suite covers:
 - **Every CLI subcommand,** including error handling for bad or switch IPs.
 - **The 50-host / 50-switch floor:** defaults meet it, smaller sizes are
   rejected, and the host and switch count formulas are checked.
-- **The demo CSV:** 250 rows with the expected columns, every
-  topology × target × failure × method combination present, and at least
-  50 hosts and 50 switches on every row.
+- **The demo CSV:** 350 averaged rows with the expected columns and no seed
+  column, every topology × target × failure × method combination present, at
+  least 50 hosts and 50 switches on every row, and the default file
+  overwritten rather than appended.
+- **Demo modes:** the full demo prints only averaged tables, and narrowing
+  options give a single run with case-by-case output and no CSV unless
+  `--csv` is given.
+
+`tests/test_dragonfly.py` checks:
+
+- **Wiring:** one global link per pair of groups, and the per-switch local,
+  global and host link counts.
+- **Paper presets:** the Table 6 sizes.
+- **Paths:** the path-count distribution and the group-aware `traverse` text.
+- **Failures:** default failures land on a global link, single-probe
+  localization works, and loops behave as on the other architectures.
+- **`info`:** it points to the solver.
+
+`tests/test_report.py` checks the averaging rules and the overwrite
+behaviour.
 
 `tests/test_ot.py` adds the OT network checks:
 

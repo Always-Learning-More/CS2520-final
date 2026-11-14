@@ -274,8 +274,8 @@ class Cli(unittest.TestCase):
         self.assertIn("11.0.11.1 dev-1a-8", out)
         self.assertIn("50 of 50 fabric links", out)
         self.assertIn("cuts off 25 hosts", out)
-        out = call("demo", "--arch", "ot-purdue", "--probes", "2", "--baseline", "4", "--seed", "1",
-                   "--no-csv")
+        out = call("demo", "--arch", "ot-purdue", "--runs", "1", "--probes", "2", "--baseline", "4",
+                   "--seed", "1", "--no-csv")
         self.assertIn("FURTHEST device from 11.0.11.1", out)
         self.assertIn("CLOSEST device from 11.0.11.1", out)
         self.assertEqual(out.count("    route            : 11.0.11.1"), 2)

@@ -51,7 +51,8 @@ class SizeFloor(unittest.TestCase):
             self.assertGreaterEqual(t.num_nodes - t.num_hosts, 50, arch)
 
     def test_defaults_are_the_smallest_allowed(self):
-        expect = {"fat-tree": 8, "leaf-spine": 34, "2d-torus": 8, "3d-torus": 4, "ot-purdue": 12}
+        expect = {"fat-tree": 8, "leaf-spine": 34, "2d-torus": 8, "3d-torus": 4, "ot-purdue": 12,
+                  "dragonfly": 4, "dragonfly-plus": 4}
         for arch, size in expect.items():
             self.assertEqual(topology.minimum_size(arch), size)
             self.assertEqual(topology.ARCHES[arch][2], size)
@@ -66,7 +67,8 @@ class SizeFloor(unittest.TestCase):
 
     def test_small_models_rejected(self):
         for arch, size in (("fat-tree", 6), ("leaf-spine", 32), ("2d-torus", 7),
-                           ("3d-torus", 3), ("ot-purdue", 11)):
+                           ("3d-torus", 3), ("ot-purdue", 11), ("dragonfly", 2),
+                           ("dragonfly-plus", 2)):
             with self.assertRaises(ValueError) as cm:
                 topology.build(arch, size)
             self.assertIn("at least 50 hosts and 50 switches", str(cm.exception))
@@ -80,11 +82,14 @@ class Addressing(unittest.TestCase):
         self.assertEqual(topology.node_id_to_ip(255), "11.0.255.1")
         self.assertEqual(topology.node_id_to_ip(256), "11.1.0.1")
         self.assertEqual(topology.node_id_to_ip(65535), "11.255.255.1")
-        for n in (0, 1, 255, 256, 1000, 65535):
+        for n in (0, 1, 255, 256, 1000, 65535, 65536, 69695):
             self.assertEqual(topology.ip_to_node_id(topology.node_id_to_ip(n)), n)
+        # past 65,535 the simulator's 32-bit arithmetic rolls into the first octet
+        self.assertEqual(topology.node_id_to_ip(65536), "12.0.0.1")
+        self.assertEqual(topology.node_id_to_ip(67583), "12.7.255.1")
 
     def test_bad_ips(self):
-        for bad in ("10.0.0.1", "11.0.0.2", "11.0.300.1", "hello", "11.0.0"):
+        for bad in ("10.0.0.1", "11.0.0.2", "11.0.300.1", "11.263.255.1", "hello", "11.0.0"):
             with self.assertRaises(ValueError):
                 topology.ip_to_node_id(bad)
 

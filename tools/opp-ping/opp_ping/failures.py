@@ -166,10 +166,26 @@ def place(kind, topo, routing, src, dst, rng, fail_at=None, fail_link=None, **pa
     return f
 
 
+def _global_ports(topo, routing, switch, dst):
+    """ECMP ports of switch toward dst that are global (inter-group) links."""
+    grp = topo.coord[switch].get("group")
+    return [p for p in routing.ecmp_ports(switch, dst)
+            if not topo.is_host(topo.neighbor(switch, p))
+            and topo.coord[topo.neighbor(switch, p)].get("group") != grp]
+
+
 def _auto_location(topo, routing, src, dst, rng, need_wrong_port=False):
     dag = routing.dag_switches(src, dst)
     dst_tor = topo.attached_switch(dst)
     candidates = [s for s in dag if s != dst_tor] or [dst_tor]   # same-switch hosts
+    if topo.arch in ("dragonfly", "dragonfly-plus"):
+        # Dragonfly family: put the failure on a global link of the path
+        on_global = [s for s in candidates if _global_ports(topo, routing, s, dst)]
+        if need_wrong_port:
+            on_global = [s for s in on_global if _has_wrong_port(topo, routing, s, dst)]
+        if on_global:
+            switch = rng.choice(sorted(on_global))
+            return switch, rng.choice(_global_ports(topo, routing, switch, dst))
     if need_wrong_port:
         # a misrouting failure needs an off-path switch neighbor to send to
         # (fat-tree: Agg -> ToR as in the paper; leaf-spine: spine -> leaf)

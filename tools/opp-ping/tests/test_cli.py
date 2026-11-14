@@ -18,7 +18,7 @@ class Cli(unittest.TestCase):
         rc, out = call("info")
         self.assertEqual(rc, 0)
         for title in ("Fat-tree (k=8)", "Leaf-spine (k=34)", "2D torus (n=8)", "3D torus (n=4)",
-                      "OT Purdue plant (n=12)"):
+                      "OT Purdue plant (n=12)", "Dragonfly (a=4", "Dragonfly+ ("):
             self.assertIn(title, out)
 
     def test_info_paper_numbers(self):
@@ -79,12 +79,16 @@ class Cli(unittest.TestCase):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "out.csv")
-            rc, out = call("demo", "--probes", "2", "--baseline", "4", "--seed", "4", "--csv", path)
-            self.assertIn("wrote 250 rows to", out)
+            rc, out = call("demo", "--runs", "3", "--probes", "2", "--baseline", "4",
+                           "--seed", "4", "--csv", path)
+            self.assertIn("wrote 350 rows to", out)
+            self.assertIn("averaged over 3 run(s)", out)
             with open(path) as f:
                 rows = list(csv.DictReader(f))
-        self.assertEqual(len(rows), 250)
+        self.assertEqual(len(rows), 350)
         self.assertEqual(list(rows[0]), report.COLUMNS)
+        self.assertNotIn("seed", rows[0])
+        self.assertTrue(all(r["runs"] == "3" for r in rows))
         self.assertEqual({r["architecture"] for r in rows}, set(cli.ARCH_CHOICES))
         self.assertEqual({r["target"] for r in rows}, {"furthest", "closest"})
         self.assertEqual({r["method"] for r in rows}, set(report.METHODS))
@@ -95,27 +99,89 @@ class Cli(unittest.TestCase):
         for r in rows:
             combos.setdefault((r["architecture"], r["target"], r["failure"], r["variant"]),
                               set()).add(r["method"])
-        self.assertEqual(len(combos), 5 * 2 * 7)
+        self.assertEqual(len(combos), 7 * 2 * 7)
         for key, methods in combos.items():
             want = {"OPP"} if key[3] == "native" else set(report.METHODS)
             self.assertEqual(methods, want, key)
         for r in rows:
             self.assertGreaterEqual(int(r["hosts"]), 50)
             self.assertGreaterEqual(int(r["switches"]), 50)
+            if r["detected"] != "":
+                self.assertTrue(0.0 <= float(r["detected"]) <= 1.0)
+
+    def test_demo_overwrites_default_csv(self):
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            old = os.getcwd()
+            os.chdir(tmp)
+            try:
+                with open(cli.DEFAULT_CSV, "w") as f:
+                    f.write("stale,data\n1,2\n")
+                call("demo", "--arch", "3d-torus", "--runs", "2", "--probes", "1",
+                     "--baseline", "2", "--seed", "5")
+                with open(cli.DEFAULT_CSV) as f:
+                    first = f.read()
+                call("demo", "--arch", "3d-torus", "--runs", "2", "--probes", "1",
+                     "--baseline", "2", "--seed", "6")
+                with open(cli.DEFAULT_CSV) as f:
+                    second = f.read()
+                files = sorted(os.listdir(tmp))
+            finally:
+                os.chdir(old)
+        self.assertEqual(files, [cli.DEFAULT_CSV])            # one file, no per-seed copies
+        self.assertNotIn("stale", first)
+        self.assertTrue(first.startswith(",".join(report.COLUMNS)))
+        self.assertEqual(len(second.splitlines()), 1 + 2 * 7 * 4 - 2 * 3)   # rewritten, not appended
 
     def test_demo_no_csv(self):
-        rc, out = call("demo", "--arch", "3d-torus", "--probes", "1", "--baseline", "0",
-                       "--seed", "1", "--no-csv")
+        rc, out = call("demo", "--arch", "3d-torus", "--runs", "1", "--probes", "1",
+                       "--baseline", "0", "--seed", "1", "--no-csv")
         self.assertNotIn("wrote", out)
 
-    def test_demo(self):
-        rc, out = call("demo", "--probes", "2", "--baseline", "4", "--seed", "9", "--no-csv")
-        self.assertEqual(rc, 0)
-        # 5 architectures x (furthest, closest)
-        self.assertEqual(out.count("[loop (native only) -> "), 10)
-        self.assertIn("3D torus", out)
-        self.assertIn("OT Purdue plant", out)
+    def test_demo_mode(self):
+        parse = cli.build_parser().parse_args
+        self.assertEqual(cli.demo_mode(parse(["demo"])), (cli.FULL_DEMO_RUNS, False))
+        self.assertEqual(cli.FULL_DEMO_RUNS, 50)
+        for narrowing in (["--target", "closest"], ["--target", "furthest"],
+                          ["--arch", "dragonfly"], ["--src", "11.0.3.1"], ["--runs", "1"]):
+            self.assertEqual(cli.demo_mode(parse(["demo"] + narrowing)), (1, True), narrowing)
+        self.assertEqual(cli.demo_mode(parse(["demo", "--target", "closest", "--runs", "5"])),
+                         (5, False))
 
+    def test_full_demo_prints_only_averaged_results(self):
+        rc, out = call("demo", "--runs", "2", "--probes", "2", "--baseline", "4", "--seed", "9",
+                       "--no-csv")
+        self.assertEqual(rc, 0)
+        self.assertNotIn("[loop (native only) -> ", out)      # no per-case output
+        self.assertNotIn("route            :", out)
+        self.assertEqual(out.count("-- averaged over 2 runs"), 7)
+        self.assertEqual(out.count("loop (native only)"), 7)
+        self.assertIn("overall: fraction of failure cases localized, averaged over 2 runs", out)
+        self.assertIn("Dragonfly+", out)
+
+    def test_individual_run_output(self):
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            old = os.getcwd()
+            os.chdir(tmp)
+            try:
+                rc, out = call("demo", "--target", "closest", "--arch", "ot-purdue",
+                               "--probes", "2", "--baseline", "4", "--seed", "3")
+                files = os.listdir(tmp)
+                call("demo", "--target", "furthest", "--arch", "fat-tree", "--probes", "1",
+                     "--baseline", "0", "--seed", "3", "--csv", "one.csv")
+                files_after = sorted(os.listdir(tmp))
+            finally:
+                os.chdir(old)
+        self.assertIn("individual run", out)
+        self.assertIn("--- CLOSEST device from 11.0.11.1:", out)
+        self.assertNotIn("FURTHEST device", out)
+        self.assertEqual(out.count("[loop (native only) -> closest]"), 1)
+        self.assertIn("this run", out)
+        self.assertEqual(files, [])                     # no CSV unless asked
+        self.assertEqual(files_after, ["one.csv"])      # written when --csv is given
 
 if __name__ == "__main__":
     unittest.main()
