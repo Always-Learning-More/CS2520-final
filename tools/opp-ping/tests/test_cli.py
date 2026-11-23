@@ -3,7 +3,7 @@ import io
 import unittest
 
 from helpers import topology  # noqa: F401  (sets sys.path)
-from opp_ping import cli, report
+from opp_ping import cli, report, sweep
 
 
 def call(*argv):
@@ -79,35 +79,36 @@ class Cli(unittest.TestCase):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "out.csv")
-            rc, out = call("demo", "--runs", "3", "--probes", "2", "--baseline", "4",
+            rc, out = call("demo", "--runs", "2", "--max-exp", "2", "--jobs", "1",
                            "--seed", "4", "--csv", path)
-            self.assertIn("wrote 350 rows to", out)
-            self.assertIn("averaged over 3 run(s)", out)
+            # 7 architectures x 2 targets x 6 failures x 6 methods x 3 budgets
+            self.assertIn("wrote 1512 rows to", out)
             with open(path) as f:
                 rows = list(csv.DictReader(f))
-        self.assertEqual(len(rows), 350)
+        self.assertEqual(len(rows), 1512)
         self.assertEqual(list(rows[0]), report.COLUMNS)
         self.assertNotIn("seed", rows[0])
-        self.assertTrue(all(r["runs"] == "3" for r in rows))
+        self.assertTrue(all(r["runs"] == "2" for r in rows))
         self.assertEqual({r["architecture"] for r in rows}, set(cli.ARCH_CHOICES))
         self.assertEqual({r["target"] for r in rows}, {"furthest", "closest"})
-        self.assertEqual({r["method"] for r in rows}, set(report.METHODS))
-        self.assertEqual({r["failure"] for r in rows},
-                         {"none", "acl-drop", "loop", "link-flap", "congestion", "port-down"})
-        # every (arch, target, failure, variant) has OPP; baselines for all but native-only loops
+        self.assertEqual({r["method"] for r in rows}, set(sweep.METHODS))
+        self.assertEqual({r["probes_per_task"] for r in rows}, {"1", "2", "4"})
+        self.assertEqual({r["failure"] for r in rows}, set(sweep.CASES))
         combos = {}
         for r in rows:
-            combos.setdefault((r["architecture"], r["target"], r["failure"], r["variant"]),
-                              set()).add(r["method"])
-        self.assertEqual(len(combos), 7 * 2 * 7)
-        for key, methods in combos.items():
-            want = {"OPP"} if key[3] == "native" else set(report.METHODS)
-            self.assertEqual(methods, want, key)
+            combos.setdefault((r["architecture"], r["target"], r["failure"], r["method"]),
+                              set()).add(r["probes_per_task"])
+        self.assertEqual(len(combos), 7 * 2 * 6 * 6)
+        self.assertTrue(all(v == {"1", "2", "4"} for v in combos.values()))
         for r in rows:
             self.assertGreaterEqual(int(r["hosts"]), 50)
             self.assertGreaterEqual(int(r["switches"]), 50)
-            if r["detected"] != "":
-                self.assertTrue(0.0 <= float(r["detected"]) <= 1.0)
+            if r["failure"] == "none":
+                self.assertEqual(r["localization_f1"], "")
+                self.assertTrue(0.0 <= float(r["false_positive_rate"]) <= 1.0)
+            else:
+                self.assertTrue(0.0 <= float(r["detection_recall"]) <= 1.0)
+                self.assertTrue(0.0 <= float(r["localization_f1"]) <= 1.0)
 
     def test_demo_overwrites_default_csv(self):
         import os
@@ -118,12 +119,12 @@ class Cli(unittest.TestCase):
             try:
                 with open(cli.DEFAULT_CSV, "w") as f:
                     f.write("stale,data\n1,2\n")
-                call("demo", "--arch", "3d-torus", "--runs", "2", "--probes", "1",
-                     "--baseline", "2", "--seed", "5")
+                call("demo", "--arch", "3d-torus", "--runs", "2", "--max-exp", "1",
+                     "--jobs", "1", "--seed", "5")
                 with open(cli.DEFAULT_CSV) as f:
                     first = f.read()
-                call("demo", "--arch", "3d-torus", "--runs", "2", "--probes", "1",
-                     "--baseline", "2", "--seed", "6")
+                call("demo", "--arch", "dragonfly", "--runs", "2", "--max-exp", "0",
+                     "--jobs", "1", "--seed", "6")
                 with open(cli.DEFAULT_CSV) as f:
                     second = f.read()
                 files = sorted(os.listdir(tmp))
@@ -132,17 +133,20 @@ class Cli(unittest.TestCase):
         self.assertEqual(files, [cli.DEFAULT_CSV])            # one file, no per-seed copies
         self.assertNotIn("stale", first)
         self.assertTrue(first.startswith(",".join(report.COLUMNS)))
-        self.assertEqual(len(second.splitlines()), 1 + 2 * 7 * 4 - 2 * 3)   # rewritten, not appended
+        self.assertEqual(len(first.splitlines()), 1 + 2 * 6 * 6 * 2)
+        self.assertEqual(len(second.splitlines()), 1 + 2 * 6 * 6 * 1)   # replaced, not appended
+        self.assertNotIn("3d-torus", second)
 
     def test_demo_no_csv(self):
-        rc, out = call("demo", "--arch", "3d-torus", "--runs", "1", "--probes", "1",
-                       "--baseline", "0", "--seed", "1", "--no-csv")
+        rc, out = call("demo", "--arch", "3d-torus", "--runs", "1", "--max-exp", "0",
+                       "--seed", "1", "--no-csv")
         self.assertNotIn("wrote", out)
 
     def test_demo_mode(self):
         parse = cli.build_parser().parse_args
         self.assertEqual(cli.demo_mode(parse(["demo"])), (cli.FULL_DEMO_RUNS, False))
         self.assertEqual(cli.FULL_DEMO_RUNS, 50)
+        self.assertEqual(parse(["demo"]).max_exp, 8)               # 2^0 .. 2^8 by default
         for narrowing in (["--target", "closest"], ["--target", "furthest"],
                           ["--arch", "dragonfly"], ["--src", "11.0.3.1"], ["--runs", "1"]):
             self.assertEqual(cli.demo_mode(parse(["demo"] + narrowing)), (1, True), narrowing)
@@ -150,14 +154,17 @@ class Cli(unittest.TestCase):
                          (5, False))
 
     def test_full_demo_prints_only_averaged_results(self):
-        rc, out = call("demo", "--runs", "2", "--probes", "2", "--baseline", "4", "--seed", "9",
+        rc, out = call("demo", "--runs", "2", "--max-exp", "2", "--jobs", "1", "--seed", "9",
                        "--no-csv")
         self.assertEqual(rc, 0)
-        self.assertNotIn("[loop (native only) -> ", out)      # no per-case output
-        self.assertNotIn("route            :", out)
+        self.assertNotIn("route            :", out)               # no per-case output
+        self.assertNotIn("legend:", out)
         self.assertEqual(out.count("-- averaged over 2 runs"), 7)
-        self.assertEqual(out.count("loop (native only)"), 7)
-        self.assertIn("overall: fraction of failure cases localized, averaged over 2 runs", out)
+        self.assertEqual(out.count("probes per task needed for localization F1 >= 0.95"), 7)
+        self.assertIn("overall detection recall (Figure 8)", out)
+        self.assertIn("overall localization F1 (Figure 9)", out)
+        for method in sweep.METHODS:
+            self.assertIn(method, out)
         self.assertIn("Dragonfly+", out)
 
     def test_individual_run_output(self):
@@ -168,18 +175,19 @@ class Cli(unittest.TestCase):
             os.chdir(tmp)
             try:
                 rc, out = call("demo", "--target", "closest", "--arch", "ot-purdue",
-                               "--probes", "2", "--baseline", "4", "--seed", "3")
+                               "--max-exp", "3", "--seed", "3")
                 files = os.listdir(tmp)
-                call("demo", "--target", "furthest", "--arch", "fat-tree", "--probes", "1",
-                     "--baseline", "0", "--seed", "3", "--csv", "one.csv")
+                call("demo", "--target", "furthest", "--arch", "fat-tree", "--max-exp", "0",
+                     "--seed", "3", "--csv", "one.csv")
                 files_after = sorted(os.listdir(tmp))
             finally:
                 os.chdir(old)
         self.assertIn("individual run", out)
         self.assertIn("--- CLOSEST device from 11.0.11.1:", out)
         self.assertNotIn("FURTHEST device", out)
-        self.assertEqual(out.count("[loop (native only) -> closest]"), 1)
-        self.assertIn("this run", out)
+        self.assertEqual(out.count("    probes per task     1    2    4    8"), 6)   # 6 failures
+        self.assertEqual(out.count("[forwarding loop -> closest]"), 1)
+        self.assertIn("legend: L localized", out)
         self.assertEqual(files, [])                     # no CSV unless asked
         self.assertEqual(files_after, ["one.csv"])      # written when --csv is given
 

@@ -114,6 +114,21 @@ def expected_hop_switches(topo, routing, src, dst):
     return layers
 
 
+def anomalous(topo, routing, src, dst, pings):
+    """True if any ping was lost, slow (> T_qdelay over base RTT) or took the
+    wrong number of hops: the trigger for R-Pingmesh*'s Traceroute."""
+    base_rtt = 2 * routing.hops(src, dst) * (engine.TX_NS + engine.LINK_DELAY_NS)
+    expected_len = routing.switch_hops(src, dst)
+    for s in pings:
+        if not s.delivered or s.reply_lost:
+            return True
+        if s.rtt_ns and s.rtt_ns - base_rtt > engine.T_QDELAY_NS:
+            return True
+        if len(s.links) != expected_len:
+            return True
+    return False
+
+
 class BaselineReport(object):
     def __init__(self):
         self.pings = []
@@ -129,9 +144,19 @@ class BaselineReport(object):
         self.rdprobe_samples = []  # per ping: (kind, link) the mirrors pinpoint, or None
 
 
-def run(topo, routing, failure, rng, src, dst, count):
+def run(topo, routing, failure, rng, src, dst, count, pings=None, trace=None):
+    """Ping ``count`` times; if anything looks wrong, Traceroute with ``count``
+    probes per TTL; then apply the R-Pingmesh* / RD-Probe* diagnosis.
+
+    ``pings`` and ``trace`` may hold precomputed, longer runs (from ``ping``
+    and ``traceroute``); then only the first ``count`` pings, and the first
+    ``count`` Traceroute probes of each TTL, are used. That is how the demo
+    evaluates 1, 2, 4, ... 256 probes per task from one simulation.
+    """
     rep = BaselineReport()
-    rep.pings = ping(topo, routing, failure, rng, src, dst, count)
+    if pings is None:
+        pings = ping(topo, routing, failure, rng, src, dst, count)
+    rep.pings = pings[:count]
     rep.paths_total = routing.path_count(src, dst)
     rep.paths_seen = len({tuple(s.links) for s in rep.pings if s.delivered
                           and all(pt in routing.ecmp_ports(n, dst) for n, pt in s.links)})
@@ -168,7 +193,9 @@ def run(topo, routing, failure, rng, src, dst, count):
     # ---------------- R-Pingmesh* (Ping + Traceroute) heuristics
     if not (lost or slow or odd):
         return rep
-    rep.trace = traceroute(topo, routing, failure, rng, src, dst, count)
+    if trace is None:
+        trace = traceroute(topo, routing, failure, rng, src, dst, count)
+    rep.trace = [(ttl, samples[:count]) for ttl, samples in trace]
     layers = expected_hop_switches(topo, routing, src, dst)
     for ttl, samples in rep.trace:
         expected = layers[ttl - 1] if ttl - 1 < len(layers) else []

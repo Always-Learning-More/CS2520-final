@@ -43,7 +43,7 @@ tools/opp-ping/opp-ping ping 11.0.0.1 --arch 3d-torus --failure link-flap -c 20
 tools/opp-ping/opp-ping ping 11.0.0.1 --failure port-down -c 1 --trace   # switch-by-switch log
 tools/opp-ping/opp-ping ping 11.0.11.1 --arch ot-purdue --target closest --failure port-down
 tools/opp-ping/opp-ping ping 11.0.11.1 --arch ot-purdue --failure loop --usm -c 5
-tools/opp-ping/opp-ping demo                       # 50 runs of every case: averaged results + CSV
+tools/opp-ping/opp-ping demo                       # 1..256 probes/task sweep, 50 runs, averaged + CSV
 tools/opp-ping/opp-ping demo --target closest      # one individual run, printed case by case
 tools/opp-ping/opp-ping demo --arch ot-purdue      # just the OT network
 tools/opp-ping/opp-ping ping 11.0.0.1 --arch dragonfly --failure port-down
@@ -64,7 +64,7 @@ ln -s "$PWD/tools/opp-ping/opp-ping" ~/.local/bin/opp-ping
 | `info` | Shows general information per architecture: hosts and switches per tier, links, IP range, diameter, equal-cost paths, ECMP fan-out, base RTT, OPP task grouping, and OP cache size per switch from the paper's formulas. |
 | `hosts` | Lists host IPs with the switch each host is attached to and its position. |
 | `failures` | Lists the failure types. |
-| `demo` | Runs every failure type (loop twice: with USM and with native multicast only) on every architecture and both targets (furthest and closest). The full demo repeats this **50 times** with new random draws and prints **only the averaged results**: one table per architecture, then an overall table, plus the CSV. Narrowing it with `--target furthest\|closest`, `--arch`, `--src` or `--runs 1` turns it into an **individual run**: one run, printed case by case with target IPs, routes and traversals. |
+| `demo` | A probe-budget sweep in the style of the paper's Figures 8 and 9, on all seven architectures. Every failure type gets 1, 2, 4, … 256 probes per task from each method (OPP at 0%, 10% and 100% USM sampling, R-Pingmesh, RD-Probe, Ping), for the furthest and the closest target. The full demo repeats this **50 times** and prints **only the averaged results**, plus the CSV. Narrowing it with `--target`, `--arch`, `--src` or `--runs 1` gives an **individual run**, printed case by case. |
 
 ### Choosing the architecture
 
@@ -302,81 +302,126 @@ runs Traceroute with N probes per TTL. It then prints:
 - which switches answered at each TTL, which shows path ambiguity;
 - the R-Pingmesh* (Traceroute heuristics) and RD-Probe* (mirroring) diagnoses.
 
-## Demo CSV (for graphs)
+## Demo: probe-budget sweep (Figures 8 and 9) and CSV
 
-The full `demo` repeats every case **50 times**. Each run draws new random
-choices: which of the equally far/close hosts is the target, where the failure
-goes, packet spraying, and flap drops. The runs use seeds `--seed`,
-`--seed`+1, and so on, so the whole batch is reproducible.
+The paper's Figures 8 and 9 plot failure detection recall and localization F1
+against **probes per task**, for OPP at three USM sampling rates and the two
+baselines, on a 64-ary fat-tree only. `demo` measures the same thing on all
+seven architectures here, for budgets from 2^0 to 2^8.
 
-Only the end results are printed:
+### Budgets
 
-- **One table per architecture:** for the furthest and the closest target,
-  each failure case, and each method, the fraction of runs in which the
-  method localized the failure. The healthy row shows false positives
-  instead.
-- **An overall table** across architectures.
+Each method gets **1, 2, 4, 8, 16, 32, 64, 128 and 256 probes per task**, so
+every case is tested 9 times. `--max-exp E` changes the top budget to 2^E.
 
-The runs can be changed two ways:
+| Method | With a budget of N probes per task |
+|---|---|
+| `OPP_Sample_0` | N OPP probes, all native multicast (the paper's OPP_Sample_0) |
+| `OPP_Sample_10` | N OPP probes, one in ten using USM, round-robin (OPP_Sample_10) |
+| `OPP_Sample_100` | N OPP probes, all using USM (OPP_Sample_100) |
+| `R-Pingmesh` | N pings; if any look wrong, N Traceroute probes per TTL, as in the paper's R-Pingmesh* |
+| `RD-Probe` | N pings, mirrored at every switch (RD-Probe*) |
+| `Ping` | N plain pings: can detect, never localizes |
 
-- **`--runs N`** averages over N runs instead of 50.
-- **Narrowing options** (`--target`, `--arch`, `--src`, or `--runs 1`) give
-  one individual run with every case printed.
+Budget N is read from the **first N probes** of one 256-probe simulation per
+case. That is the paper's "probes per task", and it means a larger budget
+can never do worse than a smaller one.
+
+Loop localization can re-inject a few extra probes (Appendix C phase 2).
+They are counted in `probes_sent`, not in the budget.
+
+### The cases
+
+Each run covers:
+
+- **Targets:** the furthest and the closest host.
+- **Failures:** the healthy network, ACL drop, forwarding loop, link flap,
+  congestion and port down.
+- **Fairness:** within a case, every method faces the *same* injected failure
+  at the same place.
+- **Independence:** each run draws a new target among the equally distant
+  hosts, a new failure placement, new spraying and new drops.
+
+### Output
+
+The full demo runs 50 times; `--runs N` changes the count. It prints only the
+averaged results:
+
+- **One table per architecture.** For each failure, target and method, the
+  table shows the smallest budget at which localization F1 reaches 0.95
+  (`>256` if it never does). The healthy row shows the worst false-positive
+  rate instead. This is the same comparison the paper makes in words, e.g.
+  "RD-Probe* needs 2^12 probes, OPP needs 1".
+- **Two overall tables:** detection recall (Figure 8) and localization F1
+  (Figure 9), against probes per task, averaged over every architecture,
+  target and failure.
+
+An **individual run** (`--target`, `--arch`, `--src` or `--runs 1`) prints
+every case instead, with one character per budget for each method: `L`
+localized, `D` detected but not localized, `W` wrong place, `.` nothing, `F`
+false positive.
+
+**Runtime.** The work is spread over all CPU cores (`--jobs N` to change);
+results don't depend on the number of workers. The full 50-run sweep takes
+about 14 minutes on one core, or about 2 minutes on eight.
+
+### The CSV
 
 The results are averaged and written to **`opp_ping_demo.csv`** in the
-current directory. **Every write replaces the previous file**; nothing is
-appended and no per-seed copies are kept. `--csv PATH` picks another file
-and `--no-csv` skips it. An individual run writes a CSV only when you give
-`--csv PATH`, so it never replaces the averaged file by accident.
+current directory. **Every write replaces the previous file.** `--csv PATH`
+picks another file and `--no-csv` skips it. An individual run writes a CSV
+only when you give `--csv PATH`, so it never replaces the averaged file by
+accident.
 
-There is one row per **topology × target (furthest/closest) × injected failure
-× method**. The default run has 7 × 2 × 7 cases, which gives 350 rows. The
-"native multicast only" loop case has an OPP row only, because the baselines
-don't depend on OPP's multicast mode. The CSV has no seed column.
+There is one row per **topology × target × failure × method × probes per
+task**: 7 × 2 × 6 × 6 × 9 = **4,536 rows** by default.
 
 | Group | Columns |
 |---|---|
 | Topology | `architecture`, `size`, `hosts`, `switches`, `links` |
 | Flow | `source_ip`, `source_device`, `target` (furthest/closest), `switch_hops`, `equal_cost_paths` |
-| Injected issue | `failure` (none, acl-drop, loop, link-flap, congestion, port-down), `failure_category`, `variant` (default, or usm/native for loops), `usm_rate_pct`, `blast_radius_hosts` |
-| Method | `method`: OPP, R-Pingmesh (Ping + Traceroute), Ping (plain), RD-Probe (Ping + mirroring) |
-| Averaging | `runs` (how many runs were averaged), `distinct_targets`, `distinct_injected_links` |
-| Outcome | `probes_sent`, `detected`, `localized`, `false_positive`, `detection_rate`, `localization_rate`, `first_detection_at`, `first_localization_at`, `missed_probes`, `wrong_reports` |
-| Cost and quality | `path_coverage_pct`, `full_coverage_rate`, `avg_rtt_us`, `max_rtt_us`, `switch_packets_per_probe`, `recirculations_per_probe` |
+| Injected issue | `failure` (none, acl-drop, loop, link-flap, congestion, port-down), `failure_category`, `blast_radius_hosts` |
+| Method and budget | `method`, `usm_rate_pct` (OPP only), `probes_per_task` (1 … 256), `probes_sent` |
+| Averaging | `runs`, `distinct_targets`, `distinct_injected_links` |
+| Paper metrics | `detection_recall` (Figure 8), `localization_f1` (Figure 9), `localization_tp_rate`, `localization_fp_rate`, `false_positive_rate` (healthy network only) |
+| Cost | `path_coverage_pct` (as in Figure 6), `switch_packets_per_probe` (as in Figure 7), `avg_rtt_us`, `recirculations_per_probe` |
 
-How the averages work:
+How the metrics are computed:
 
-- **Every number is the mean over the runs.**
-- **The 0/1 columns become fractions of runs.** For example, `localized` =
-  0.86 means the method localized the failure in 86% of the 50 runs.
-- **`first_detection_at` and `first_localization_at`** are averaged only over
-  the runs where that happened.
-- **The target IP and injected link change from run to run,** so the CSV
-  records how many different ones were used (`distinct_targets`,
-  `distinct_injected_links`) instead of a single value. Run 1's terminal
-  output shows actual examples.
-- **For R-Pingmesh, `probes_sent`** includes the Traceroute probes.
-- **Ping never localizes,** so its `localized` is always 0.
-- **Blank cells** mean "not applicable".
+- **`detection_recall`** is the fraction of runs in which the method detected
+  the failure within the budget.
+- **`localization_f1`** uses all the runs together:
+  - true positive (TP): the method named the injected link or misconfigured
+    switch;
+  - false positive (FP): it named a wrong place;
+  - false negative (FN): it didn't name the right place;
+  - F1 = 2TP / (2TP + FP + FN). This is computed from the summed counts, not
+    averaged per run.
+- **The other numeric columns** are means over the runs.
+- **The target and failure link change from run to run,** so the CSV records
+  how many different ones were used.
 
-The CSV holds the same averages as the printed tables, plus every other
-metric.
-
-For example, with pandas:
+For example, to redraw Figure 9 for every architecture with pandas and
+matplotlib:
 
 ```python
-import pandas as pd
+import pandas as pd, matplotlib.pyplot as plt
 df = pd.read_csv("opp_ping_demo.csv")
-faults = df[(df.failure != "none") & (df.variant != "native")]
-faults.pivot_table(index=["architecture", "target"], columns="method",
-                   values="localized", aggfunc="mean")
+d = df[(df.failure == "acl-drop") & (df.target == "furthest")]
+for arch, g in d.groupby("architecture"):
+    ax = plt.figure().gca()
+    for method, m in g.groupby("method"):
+        ax.plot(m.probes_per_task, m.localization_f1, marker="o", label=method)
+    ax.set_xscale("log", base=2); ax.set_title(arch); ax.set_xlabel("# probes per task")
+    ax.set_ylabel("F1 score"); ax.legend()
+plt.show()
 ```
 
 ## Tests
 
 ```bash
 cd tools/opp-ping
-python3 -m unittest discover -s tests -v          # 98 tests, about 3 s
+python3 -m unittest discover -s tests -v          # 107 tests, about 10 s
 ```
 
 The suite covers:
@@ -403,10 +448,10 @@ The suite covers:
 - **Every CLI subcommand,** including error handling for bad or switch IPs.
 - **The 50-host / 50-switch floor:** defaults meet it, smaller sizes are
   rejected, and the host and switch count formulas are checked.
-- **The demo CSV:** 350 averaged rows with the expected columns and no seed
-  column, every topology × target × failure × method combination present, at
-  least 50 hosts and 50 switches on every row, and the default file
-  overwritten rather than appended.
+- **The demo CSV:** every topology × target × failure × method combination
+  present at every budget, the expected columns with no seed column, at least
+  50 hosts and 50 switches on every row, and the default file overwritten
+  rather than appended.
 - **Demo modes:** the full demo prints only averaged tables, and narrowing
   options give a single run with case-by-case output and no CSV unless
   `--csv` is given.
@@ -421,8 +466,23 @@ The suite covers:
   localization works, and loops behave as on the other architectures.
 - **`info`:** it points to the solver.
 
-`tests/test_report.py` checks the averaging rules and the overwrite
-behaviour.
+`tests/test_report.py` checks the averaging rules, recall and F1, and the
+overwrite behaviour.
+
+`tests/test_sweep.py` checks:
+
+- **Budgets:** 2^0 … 2^8, and the number of rows per run.
+- **Monotone outcomes:** detection and localization never get worse with a
+  larger budget.
+- **`probes_sent`:** R-Pingmesh's Traceroute adds N probes per TTL.
+- **The paper's patterns:**
+  - one OPP probe localizes ACL drop, port down and congestion;
+  - OPP_Sample_0 never sees a loop, and OPP_Sample_100 sees it soonest;
+  - Ping never localizes;
+  - there are no false positives.
+- **Coverage:** host-generated pings cover paths gradually (1 of 16 with one
+  ping on the fat-tree).
+- **Parallelism:** parallel and serial runs give identical results.
 
 `tests/test_ot.py` adds the OT network checks:
 

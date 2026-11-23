@@ -6,4 +6,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from opp_ping.cli import main  # noqa: E402
 
-sys.exit(main())
+# The guard matters: `demo` starts worker processes, and with the "spawn" or
+# "forkserver" start method (the default on Linux since Python 3.14) each worker
+# re-imports this file. Without the guard every worker would rerun the demo.
+if __name__ == "__main__":
+    sys.exit(main())
